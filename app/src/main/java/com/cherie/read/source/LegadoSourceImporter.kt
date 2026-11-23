@@ -9,6 +9,7 @@ import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import com.google.gson.JsonParser
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 class SourceVerificationRequiredException(
@@ -18,6 +19,7 @@ class SourceVerificationRequiredException(
 
 /** Shared HTTP client for source import, search, TOC/content loading and OTA downloads. */
 object LegadoSourceImporter {
+    private const val MAX_SOURCE_JSON_BYTES = 20 * 1024 * 1024
     @Volatile
     var userAgent: String = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36"
 
@@ -116,7 +118,19 @@ object LegadoSourceImporter {
                     .build()
 
                 client.newCall(request).execute().use { response ->
-                    val text = (response.body?.string() ?: "").removePrefix("\uFEFF").trim()
+                    val body = response.body
+                    if ((body?.contentLength() ?: 0L) > MAX_SOURCE_JSON_BYTES) throw IOException("书源 JSON 超过 20 MB 限制")
+                    val output = ByteArrayOutputStream()
+                    body?.byteStream()?.use { input ->
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            if (output.size() + n > MAX_SOURCE_JSON_BYTES) throw IOException("书源 JSON 超过 20 MB 限制")
+                            output.write(buffer, 0, n)
+                        }
+                    }
+                    val text = String(output.toByteArray(), Charsets.UTF_8).removePrefix("\uFEFF").trim()
                     val contentType = response.header("Content-Type").orEmpty()
                     val html = looksLikeHtml(text, contentType)
 

@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -28,7 +29,7 @@ import kotlinx.coroutines.*
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error -> Log.e("CherieRead", "后台任务异常", error) })
     private val gson = Gson()
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var lastBackPressTime = 0L
@@ -57,7 +58,7 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = true
             allowContentAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = "$systemUserAgent CherieReadAPK/1.3.3"
+            userAgentString = "$systemUserAgent CherieReadAPK/1.3.4"
         }
 
         webView.addJavascriptInterface(CherieJsBridge(), "CherieNative")
@@ -149,7 +150,11 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun fetchTocDetailedNative(tocUrl: String, sourceJson: String, cbId: String) {
             scope.launch {
-                val result = LegadoRuleEngine.fetchTocDetailed(tocUrl, sourceJson)
+                val result = try { LegadoRuleEngine.fetchTocDetailed(tocUrl, sourceJson) }
+                catch (e: Exception) {
+                    Log.e("CherieRead", "TOC bridge failed", e)
+                    mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "error", "message" to (e.message ?: "目录请求失败"))
+                }
                 sendCallback(cbId, gson.toJson(result))
             }
         }
@@ -157,7 +162,11 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun fetchContentDetailedNative(chapterUrl: String, sourceJson: String, cbId: String) {
             scope.launch {
-                val result = LegadoRuleEngine.fetchContentDetailed(chapterUrl, sourceJson)
+                val result = try { LegadoRuleEngine.fetchContentDetailed(chapterUrl, sourceJson) }
+                catch (e: Exception) {
+                    Log.e("CherieRead", "content bridge failed", e)
+                    mapOf("content" to "", "status" to "error", "message" to (e.message ?: "正文请求失败"))
+                }
                 sendCallback(cbId, gson.toJson(result))
             }
         }
@@ -256,8 +265,10 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun sendCallback(cbId: String, jsonPayload: String) {
-        val escaped = gson.toJson(jsonPayload)
-        evalJs("window.onNativeCallback && window.onNativeCallback('$cbId', $escaped);")
+        if (!cbId.matches(Regex("[A-Za-z0-9_-]{1,96}"))) return
+        val escapedId = gson.toJson(cbId)
+        val escapedPayload = gson.toJson(jsonPayload)
+        evalJs("window.onNativeCallback && window.onNativeCallback($escapedId, $escapedPayload);")
     }
 
     @Deprecated("Deprecated in Java")
@@ -279,7 +290,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun evalJs(script: String) {
-        runOnUiThread { webView.evaluateJavascript(script, null) }
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed && ::webView.isInitialized) {
+                try { webView.evaluateJavascript(script, null) }
+                catch (e: Exception) { Log.w("CherieRead", "WebView callback unavailable", e) }
+            }
+        }
     }
 
     override fun onDestroy() {
