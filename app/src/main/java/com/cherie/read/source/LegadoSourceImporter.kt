@@ -42,14 +42,14 @@ object LegadoSourceImporter {
                     val cookieLine = buildString {
                         append(cookie.name).append('=').append(cookie.value)
                         append("; Path=").append(cookie.path)
-                        if (!cookie.hostOnly()) append("; Domain=").append(cookie.domain)
-                        if (cookie.persistent()) append("; Expires=").append(
+                        if (!cookie.hostOnly) append("; Domain=").append(cookie.domain)
+                        if (cookie.persistent) append("; Expires=").append(
                             java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US).apply {
                                 timeZone = java.util.TimeZone.getTimeZone("GMT")
-                            }.format(java.util.Date(cookie.expiresAt()))
+                            }.format(java.util.Date(cookie.expiresAt))
                         )
-                        if (cookie.secure()) append("; Secure")
-                        if (cookie.httpOnly()) append("; HttpOnly")
+                        if (cookie.secure) append("; Secure")
+                        if (cookie.httpOnly) append("; HttpOnly")
                     }
                     manager.setCookie(url.toString(), cookieLine)
                 }
