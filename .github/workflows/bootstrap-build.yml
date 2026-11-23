@@ -6,6 +6,9 @@ on:
     paths:
       - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
       - '.github/workflows/bootstrap-build.yml'
+      - 'app/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
   workflow_dispatch:
 
 permissions:
@@ -32,10 +35,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cherie"
           unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/cherie"
           cp -a "$RUNNER_TEMP/cherie/." .
-          # The archive contains the normal build workflow, but this bootstrap
-          # token cannot push changes under .github/workflows. Install it later
-          # via the GitHub Contents API after this source commit succeeds.
+          # Avoid pushing workflow files: the connected GitHub App lacks
+          # the dedicated workflow permission. Keep this workflow as builder.
           rm -f .github/workflows/build-apk.yml
+          rm -f "$ARCHIVE"
 
       - name: Commit expanded project
         shell: bash
@@ -49,8 +52,12 @@ jobs:
             echo "Unexpected workflow-file change staged; refusing to push."
             exit 1
           fi
-          git commit -m "Add Chérie Read v1.3.3 Android project [skip ci]"
-          git push origin HEAD:main
+          if git diff --cached --quiet; then
+            echo "No project changes to commit; continuing to build."
+          else
+            git commit -m "Add Chérie Read v1.3.3 Android project [skip ci]"
+            git push origin HEAD:main
+          fi
 
       - name: Set up JDK
         uses: actions/setup-java@v4
