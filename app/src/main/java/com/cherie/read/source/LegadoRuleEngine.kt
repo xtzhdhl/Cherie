@@ -556,7 +556,7 @@ object LegadoRuleEngine {
                 if(extracted.isNotBlank()){val resolved=resolveUrl(response.finalUrl,extracted);if(resolved!=tocUrl){response=httpGetOrPost(resolved,baseUrl,null,headers);tocUrl=response.finalUrl}}
             }
             val root=try{JsonParser.parseString(response.body).takeIf{it.isJsonObject||it.isJsonArray}}catch(_:Exception){null}
-            val chapters:List<Map<String,String>>=if(listRule.startsWith("$")){
+            val chapters: List<Map<String, String>> = if (listRule.startsWith("$")) {
                 if(root==null)return mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "invalid","message" to "目录规则是 JSONPath，但接口响应不是 JSON")
                 readJsonPathMany(root,listRule).flatMap{if(it.isJsonArray)it.asJsonArray.toList()else listOf(it)}.take(1000).mapNotNull{row->
                     val title=jsonRuleValue(row,nameRule).ifBlank{if(row.isJsonPrimitive)stringValue(row)else ""};val href=jsonRuleValue(row,urlRule)
