@@ -18,6 +18,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
+import org.jsoup.select.NodeTraversor
+import org.jsoup.select.NodeVisitor
 import com.google.gson.JsonNull
 import com.google.gson.JsonPrimitive
 import java.net.URI
@@ -222,33 +226,72 @@ object LegadoRuleEngine {
         throw UnsupportedLegadoJsException("搜索地址 JavaScript 没有生成可用 URL")
     }
 
-    /** Convert Legado's class./id./tag. token syntax while also accepting ordinary CSS selectors. */
+    /** Split fallback rules without treating CSS attribute pipes as alternatives. */
+    private fun splitRuleAlternatives(rule: String): List<String> {
+        val value = rule.trim()
+        if (value.isBlank()) return emptyList()
+        if (value.contains("<js>", true) || value.contains("@js:", true)) return listOf(value)
+        val output = mutableListOf<String>()
+        var start = 0
+        var squareDepth = 0
+        var roundDepth = 0
+        var quote: Char? = null
+        var escaped = false
+        var i = 0
+        while (i < value.length) {
+            val ch = value[i]
+            if (quote != null) {
+                if (escaped) escaped = false
+                else if (ch == '\\') escaped = true
+                else if (ch == quote) quote = null
+                i++
+                continue
+            }
+            when (ch) {
+                '\'', '"' -> quote = ch
+                '[' -> squareDepth++
+                ']' -> squareDepth = (squareDepth - 1).coerceAtLeast(0)
+                '(' -> roundDepth++
+                ')' -> roundDepth = (roundDepth - 1).coerceAtLeast(0)
+                '|' -> if (squareDepth == 0 && roundDepth == 0) {
+                    value.substring(start, i).trim().takeIf { it.isNotBlank() }?.let(output::add)
+                    if (i + 1 < value.length && value[i + 1] == '|') i++
+                    start = i + 1
+                }
+            }
+            i++
+        }
+        value.substring(start).trim().takeIf { it.isNotBlank() }?.let(output::add)
+        return output.ifEmpty { listOf(value) }
+    }
+
     private fun toCss(token: String): String {
         val t = token.trim()
         if (t.isEmpty()) return "*"
         return when {
-            t.startsWith("class.") -> "." + t.removePrefix("class.").substringBefore('.').trim()
-            t.startsWith("id.") -> "#" + t.removePrefix("id.").substringBefore('.').trim()
-            t.startsWith("tag.") -> t.removePrefix("tag.").substringBefore('@').substringBeforeLast(".0").trim()
+            t.startsWith("class.") -> "." + t.removePrefix("class.").replace(Regex("\\.\\d+$"), "")
+            t.startsWith("id.") -> "#" + t.removePrefix("id.").replace(Regex("\\.\\d+$"), "")
+            t.startsWith("tag.") -> t.removePrefix("tag.").substringBefore('@').replace(Regex("\\.\\d+$"), "")
             t.startsWith(".") || t.startsWith("#") || t.contains(' ') || t.contains('>') || t.contains('[') -> t
-            else -> t.substringBeforeLast(".0").ifBlank { t }
+            else -> t.replace(Regex("\\.\\d+$"), "").ifBlank { t }
         }
     }
 
     private fun extractValue(element: Element, rule: String?): String {
         if (rule.isNullOrBlank()) return ""
-        for (alternative in rule.split("||")) {
+        for (alternative in splitRuleAlternatives(rule)) {
             val parts = alternative.trim().split('@')
             var current: Element? = element
             var attribute = "text"
             for (index in parts.indices) {
                 val part = parts[index].trim()
-                if (part.isEmpty()) continue
+                if (part.isEmpty() || part.equals("all", true)) continue
                 if (index == parts.lastIndex && part in listOf("text", "textNodes", "html", "href", "src", "content", "title")) {
                     attribute = part
                 } else {
                     current = try { current?.selectFirst(toCss(part)) } catch (_: Exception) { null }
                 }
+                if (current == null) break
             }
             val value = when (attribute) {
                 "href" -> current?.attr("href") ?: ""
@@ -288,15 +331,28 @@ object LegadoRuleEngine {
         if (nodes.size == 1) return nodes[0]
         return com.google.gson.JsonArray().apply { nodes.forEach { add(it) } }
     }
-    private fun jsonRuleValue(root: JsonElement,rule: String?): String {
-        val clean=rule.orEmpty().trim().substringBefore('@');if(clean.isBlank())return ""
-        val path=if(clean.startsWith("$"))clean else "$.$clean"
-        return readJsonPathMany(root,path).firstOrNull()?.let(::stringValue).orEmpty()
+    private fun jsonRuleValue(root: JsonElement, rule: String?): String {
+        if (rule.isNullOrBlank()) return ""
+        for (alternative in splitRuleAlternatives(rule)) {
+            val pathPart = alternative.trim().substringBefore('@').trim()
+            if (pathPart.isBlank()) continue
+            val path = if (pathPart.startsWith("$")) pathPart else "$.$pathPart"
+            val value = readJsonPathMany(root, path).firstOrNull()?.let(::stringValue).orEmpty()
+            if (value.isNotBlank() && value != "null") return value
+        }
+        return ""
     }
-    private fun selectLegadoElements(context: Element,rule: String): List<Element> {
-        val parts=rule.split('@').map{it.trim()}.filter{it.isNotEmpty()};if(parts.isEmpty())return emptyList()
-        var selected=try{context.select(toCss(parts[0])).toList()}catch(_:Exception){emptyList()}
-        parts.drop(1).forEach{token->if(token !in listOf("text","textNodes","html","href","src","content","title"))selected=selected.flatMap{parent->try{parent.select(toCss(token)).toList()}catch(_:Exception){emptyList()}}}
+
+    private fun selectLegadoElements(context: Element, rule: String): List<Element> {
+        val parts = rule.split('@').map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return emptyList()
+        var selected = try { context.select(toCss(parts[0])).toList() } catch (_: Exception) { emptyList() }
+        parts.drop(1).forEach { token ->
+            if (token.equals("all", true) || token in listOf("text", "textNodes", "html", "href", "src", "content", "title")) return@forEach
+            selected = selected.flatMap { parent ->
+                try { parent.select(toCss(token)).toList() } catch (_: Exception) { emptyList() }
+            }
+        }
         return selected
     }
 
@@ -525,6 +581,33 @@ object LegadoRuleEngine {
         return fallbackBooksFromHtml(body, finalUrl, sourceName, sourceUrl, source)
     }
 
+    private fun extractTextPreservingParagraphs(root: Element): String {
+        val output = StringBuilder()
+        NodeTraversor.traverse(object : NodeVisitor {
+            override fun head(node: Node, depth: Int) {
+                when (node) {
+                    is TextNode -> output.append(node.wholeText)
+                    is Element -> when {
+                        node.normalName() == "br" -> output.append('\n')
+                        node.isBlock && output.isNotEmpty() && output.last() != '\n' -> output.append('\n')
+                    }
+                }
+            }
+            override fun tail(node: Node, depth: Int) {
+                if (node is Element && node.isBlock && output.isNotEmpty() && output.last() != '\n') output.append('\n')
+            }
+        }, root)
+        return output.toString().replace('\u00A0', ' ').replace("\r\n", "\n").replace('\r', '\n')
+            .replace(Regex("[\\t\\x0B\\f ]+"), " ").replace(Regex(" *\\n *"), "\n")
+            .replace(Regex("\\n{3,}"), "\n\n").trim()
+    }
+
+    private fun contentTextFromHtml(html: String, baseUrl: String): String {
+        val doc = Jsoup.parseBodyFragment(html, baseUrl)
+        doc.select("script,style,noscript,template,iframe,object,.ads,.advertisement").remove()
+        return extractTextPreservingParagraphs(doc.body())
+    }
+
     private fun searchOneSource(sourceElement: JsonElement, queries: List<String>): SourceSearchResult {
         val emptyBooks = mutableListOf<Map<String, Any>>()
         if (!sourceElement.isJsonObject) {
@@ -714,25 +797,32 @@ object LegadoRuleEngine {
         return out
     }
 
-    /** Read exploreUrl categories from enabled sources. */
+    /** Preserve source index to keep categories bound to the exact originating source. */
     fun exploreCategories(sourcesJson: String): List<Map<String, String>> {
         val sources = try { JsonParser.parseString(sourcesJson).asJsonArray.toList() } catch (_: Exception) { emptyList() }
-        return sources.filter { it.isJsonObject }.flatMap { source ->
+        return sources.flatMapIndexed { sourceIndex, source ->
+            if (!source.isJsonObject) return@flatMapIndexed emptyList()
             val obj = source.asJsonObject
             if (obj.has("enabled") && !obj.get("enabled").isJsonNull &&
-                !runCatching { obj.get("enabled").asBoolean }.getOrDefault(true)) return@flatMap emptyList()
+                !runCatching { obj.get("enabled").asBoolean }.getOrDefault(true)) return@flatMapIndexed emptyList()
             val baseUrl = stringValue(obj.get("bookSourceUrl"))
-            if (baseUrl.isBlank()) return@flatMap emptyList()
+            if (baseUrl.isBlank()) return@flatMapIndexed emptyList()
             val sourceName = stringValue(obj.get("bookSourceName")).ifBlank { "Legado 书源" }
             val sourceId = stringValue(obj.get("_cherieSourceId"))
             exploreEntries(source, baseUrl).map { entry ->
-                mapOf("sourceId" to sourceId, "sourceName" to sourceName, "categoryName" to entry.first,
-                    "url" to entry.second, "bookSourceUrl" to baseUrl)
+                mapOf(
+                    "sourceId" to sourceId,
+                    "sourceIndex" to sourceIndex.toString(),
+                    "sourceName" to sourceName,
+                    "categoryName" to entry.first,
+                    "url" to entry.second,
+                    "bookSourceUrl" to baseUrl
+                )
             }
         }
     }
 
-    /** Fetch one category page with the source's ruleExplore selectors. */
+    /** Fetch category pages using ordered CSS / JSONPath / JS alternatives. */
     fun exploreBooksDetailed(sourceJson: String, categoryUrl: String, page: Int = 1): Map<String, Any> {
         val empty = emptyList<Map<String, Any>>()
         return try {
@@ -740,8 +830,14 @@ object LegadoRuleEngine {
             val sourceName = stringValue(source.get("bookSourceName")).ifBlank { "Legado 书源" }
             val baseUrl = stringValue(source.get("bookSourceUrl"))
             val headers = stringValue(source.get("header"))
-            val rules = source.getAsJsonObject("ruleExplore")
-                ?: return mapOf("books" to empty, "status" to "no_explore", "message" to "该书源没有配置 ruleExplore")
+            val rulesValue = source.get("ruleExplore")
+            val rules = when {
+                rulesValue == null || rulesValue.isJsonNull -> null
+                rulesValue.isJsonObject -> rulesValue.asJsonObject
+                rulesValue.isJsonPrimitive && rulesValue.asJsonPrimitive.isString ->
+                    runCatching { JsonParser.parseString(rulesValue.asString).asJsonObject }.getOrNull()
+                else -> null
+            } ?: return mapOf("books" to empty, "status" to "no_explore", "message" to "该书源没有配置有效的 ruleExplore")
             val listRule = stringValue(rules.get("bookList")).trim()
             if (baseUrl.isBlank() || listRule.isBlank()) {
                 return mapOf("books" to empty, "status" to "invalid", "message" to "缺少 bookSourceUrl 或 ruleExplore.bookList")
@@ -750,6 +846,7 @@ object LegadoRuleEngine {
             val response = httpGetOrPost(requestUrl, baseUrl, null, headers)
             val body = response.body
             val document = Jsoup.parse(body, response.finalUrl)
+            val root = runCatching { JsonParser.parseString(body) }.getOrNull()
             val nameRule = stringValue(rules.get("name"))
             val authorRule = stringValue(rules.get("author"))
             val bookUrlRule = stringValue(rules.get("bookUrl"))
@@ -760,11 +857,10 @@ object LegadoRuleEngine {
             val wordCountRule = stringValue(rules.get("wordCount"))
             val books = mutableListOf<Map<String, Any>>()
             var fallbackUsed = false
-            val jsRows = htmlRowsFromJs(listRule, document, body, "", baseUrl, source, headers)
 
             fun appendJsonRow(row: JsonElement) {
-                val isHtml = row.isJsonPrimitive && row.asJsonPrimitive.isString
-                val htmlRow = if (isHtml) Jsoup.parseBodyFragment(row.asString).body() else null
+                val htmlRow = if (row.isJsonPrimitive && row.asJsonPrimitive.isString && row.asString.trimStart().startsWith("<"))
+                    Jsoup.parseBodyFragment(row.asString, response.finalUrl).body() else null
                 val title = if (htmlRow != null) htmlFieldValue(htmlRow, nameRule, body, "", baseUrl, source, headers)
                     else jsonFieldValue(row, nameRule, body, "", baseUrl, source, headers)
                 val href = if (htmlRow != null) htmlFieldValue(htmlRow, bookUrlRule, body, "", baseUrl, source, headers)
@@ -782,38 +878,49 @@ object LegadoRuleEngine {
                     else jsonFieldValue(row, lastChapterRule, body, "", baseUrl, source, headers)
                 val wordCount = if (htmlRow != null) htmlFieldValue(htmlRow, wordCountRule, body, "", baseUrl, source, headers)
                     else jsonFieldValue(row, wordCountRule, body, "", baseUrl, source, headers)
-                books.add(mapOf("name" to title, "author" to author.ifBlank { "未知作者" },
+                books.add(mapOf(
+                    "name" to title, "author" to author.ifBlank { "未知作者" },
                     "bookUrl" to resolveUrl(response.finalUrl, href), "intro" to intro,
                     "coverUrl" to if (cover.isBlank()) "" else resolveUrl(response.finalUrl, cover),
                     "kind" to kind, "lastChapter" to lastChapter, "wordCount" to wordCount,
-                    "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source))
+                    "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source
+                ))
             }
 
-            when {
-                jsRows != null -> jsRows.take(60).forEach(::appendJsonRow)
-                listRule.startsWith("$") -> {
-                    val jsonRoot = JsonParser.parseString(body)
-                    val rows = readJsonPath(jsonRoot, listRule)
-                    if (rows != null && rows.isJsonArray) rows.asJsonArray.take(60).forEach(::appendJsonRow)
-                }
-                else -> {
-                    selectLegadoElements(document, listRule).take(60).forEach { row ->
-                        val title = htmlFieldValue(row, nameRule, body, "", baseUrl, source, headers)
-                        val href = htmlFieldValue(row, bookUrlRule, body, "", baseUrl, source, headers)
-                        if (title.isBlank() || href.isBlank()) return@forEach
-                        val cover = htmlFieldValue(row, coverRule, body, "", baseUrl, source, headers)
-                        books.add(mapOf("name" to title,
-                            "author" to htmlFieldValue(row, authorRule, body, "", baseUrl, source, headers).ifBlank { "未知作者" },
-                            "bookUrl" to resolveUrl(response.finalUrl, href),
-                            "intro" to htmlFieldValue(row, introRule, body, "", baseUrl, source, headers),
-                            "coverUrl" to if (cover.isBlank()) "" else resolveUrl(response.finalUrl, cover),
-                            "kind" to htmlFieldValue(row, kindRule, body, "", baseUrl, source, headers),
-                            "lastChapter" to htmlFieldValue(row, lastChapterRule, body, "", baseUrl, source, headers),
-                            "wordCount" to htmlFieldValue(row, wordCountRule, body, "", baseUrl, source, headers),
-                            "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source))
+            for (candidate in splitRuleAlternatives(listRule)) {
+                val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
+                when {
+                    jsRows != null -> jsRows.take(100).forEach(::appendJsonRow)
+                    candidate.trim().startsWith("$") -> {
+                        if (root == null) continue
+                        readJsonPathMany(root, candidate).flatMap { if (it.isJsonArray) it.asJsonArray.toList() else listOf(it) }
+                            .take(100).forEach(::appendJsonRow)
+                    }
+                    else -> {
+                        selectLegadoElements(document, candidate).take(100).forEach { row ->
+                            val title = htmlFieldValue(row, nameRule, body, "", baseUrl, source, headers).ifBlank { row.text().trim() }
+                            val href = htmlFieldValue(row, bookUrlRule, body, "", baseUrl, source, headers)
+                                .ifBlank { row.attr("href").ifBlank { row.selectFirst("a[href]")?.attr("href").orEmpty() } }
+                            if (title.isNotBlank() && href.isNotBlank()) {
+                                val cover = htmlFieldValue(row, coverRule, body, "", baseUrl, source, headers)
+                                books.add(mapOf(
+                                    "name" to title,
+                                    "author" to htmlFieldValue(row, authorRule, body, "", baseUrl, source, headers).ifBlank { "未知作者" },
+                                    "bookUrl" to resolveUrl(response.finalUrl, href),
+                                    "intro" to htmlFieldValue(row, introRule, body, "", baseUrl, source, headers),
+                                    "coverUrl" to if (cover.isBlank()) "" else resolveUrl(response.finalUrl, cover),
+                                    "kind" to htmlFieldValue(row, kindRule, body, "", baseUrl, source, headers),
+                                    "lastChapter" to htmlFieldValue(row, lastChapterRule, body, "", baseUrl, source, headers),
+                                    "wordCount" to htmlFieldValue(row, wordCountRule, body, "", baseUrl, source, headers),
+                                    "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source
+                                ))
+                            }
+                        }
                     }
                 }
+                if (books.isNotEmpty()) break
             }
+
             if (books.isEmpty()) {
                 val fallback = fallbackBooksFromResponse(body, response.finalUrl, sourceName, baseUrl, source)
                 if (fallback.isNotEmpty()) {
@@ -822,12 +929,15 @@ object LegadoRuleEngine {
                 }
             }
             val unique = books.distinctBy { it["bookUrl"].toString() }
-            mapOf("books" to unique, "status" to if (unique.isEmpty()) "empty" else "ok",
+            mapOf(
+                "books" to unique,
+                "status" to if (unique.isEmpty()) "empty" else "ok",
                 "message" to when {
                     unique.isEmpty() -> "已请求书源发现页，但原规则与兼容解析均未识别到书目"
                     fallbackUsed -> "原 ruleExplore 未匹配，已用兼容解析发现 ${unique.size} 本书"
                     else -> "发现 " + unique.size + " 本书"
-                })
+                }
+            )
         } catch (e: VerificationRequiredException) {
             mapOf("books" to empty, "status" to "verification_required", "verificationUrl" to e.verificationUrl,
                 "message" to (e.message ?: "需要人机验证"))
@@ -960,40 +1070,97 @@ object LegadoRuleEngine {
 
     fun fetchTocDetailed(bookUrl: String, sourceJson: String): Map<String, Any> {
         return try {
-            val source=JsonParser.parseString(sourceJson).asJsonObject
-            val baseUrl=stringValue(source.get("bookSourceUrl")).ifBlank{bookUrl};val headers=stringValue(source.get("header"))
-            val rules=source.getAsJsonObject("ruleToc")?:return mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "invalid","message" to "缺少 ruleToc")
-            val listRule=stringValue(rules.get("chapterList")).trim();val nameRule=stringValue(rules.get("chapterName"));val urlRule=stringValue(rules.get("chapterUrl"))
-            if(listRule.isBlank())return mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "invalid","message" to "chapterList 为空")
-            if(listRule.contains("<js>",true)||listRule.contains("@js:",true)||nameRule.contains("@js:",true)||urlRule.contains("@js:",true))
-                return mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "unsupported_js","message" to "目录规则依赖 JS，当前版本不支持")
-            var response=httpGetOrPost(bookUrl,baseUrl,null,headers);var tocUrl=response.finalUrl
-            val bookInfo=try{source.getAsJsonObject("ruleBookInfo")}catch(_:Exception){null}
-            val tocUrlRule=bookInfo?.get("tocUrl")?.takeUnless{it.isJsonNull}?.let(::stringValue).orEmpty()
-            if(tocUrlRule.isNotBlank()){
-                val jsonFirst=try{JsonParser.parseString(response.body).takeIf{it.isJsonObject||it.isJsonArray}}catch(_:Exception){null}
-                val extracted=if(jsonFirst!=null&&(tocUrlRule.startsWith("$")||!tocUrlRule.contains('<')))jsonRuleValue(jsonFirst,tocUrlRule)else extractValue(Jsoup.parse(response.body,response.finalUrl),tocUrlRule)
-                if(extracted.isNotBlank()){val resolved=resolveUrl(response.finalUrl,extracted);if(resolved!=tocUrl){response=httpGetOrPost(resolved,baseUrl,null,headers);tocUrl=response.finalUrl}}
+            val source = JsonParser.parseString(sourceJson).asJsonObject
+            val baseUrl = stringValue(source.get("bookSourceUrl")).ifBlank { bookUrl }
+            val headers = stringValue(source.get("header"))
+            val rules = source.getAsJsonObject("ruleToc")
+                ?: return mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "invalid", "message" to "缺少 ruleToc")
+            val listRule = stringValue(rules.get("chapterList")).trim()
+            val nameRule = stringValue(rules.get("chapterName"))
+            val urlRule = stringValue(rules.get("chapterUrl"))
+            if (listRule.isBlank()) {
+                return mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "invalid", "message" to "chapterList 为空")
             }
-            val root=try{JsonParser.parseString(response.body).takeIf{it.isJsonObject||it.isJsonArray}}catch(_:Exception){null}
-            val chapters: List<Map<String, String>> = if (listRule.startsWith("$")) {
-                if(root==null)return mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "invalid","message" to "目录规则是 JSONPath，但接口响应不是 JSON")
-                readJsonPathMany(root,listRule).flatMap{if(it.isJsonArray)it.asJsonArray.toList()else listOf(it)}.take(1000).mapNotNull{row->
-                    val title=jsonRuleValue(row,nameRule).ifBlank{if(row.isJsonPrimitive)stringValue(row)else ""};val href=jsonRuleValue(row,urlRule)
-                    if(title.isBlank()||href.isBlank())null else mapOf("title" to title,"url" to resolveUrl(tocUrl,href))
+
+            var response = httpGetOrPost(bookUrl, baseUrl, null, headers)
+            var tocUrl = response.finalUrl
+            val bookInfo = try { source.getAsJsonObject("ruleBookInfo") } catch (_: Exception) { null }
+            val tocUrlRule = bookInfo?.get("tocUrl")?.takeUnless { it.isJsonNull }?.let(::stringValue).orEmpty()
+            if (tocUrlRule.isNotBlank()) {
+                val jsonRoot = runCatching { JsonParser.parseString(response.body).takeIf { it.isJsonObject || it.isJsonArray } }.getOrNull()
+                val extracted = if (LegadoJsRuntime.isJsRule(tocUrlRule)) {
+                    jsScalar(evalSourceJs(tocUrlRule, response.body, response.body, "", baseUrl, source, headers))
+                } else if (jsonRoot != null && (tocUrlRule.trim().startsWith("$") || !tocUrlRule.contains('<'))) {
+                    jsonRuleValue(jsonRoot, tocUrlRule)
+                } else {
+                    val page = Jsoup.parse(response.body, response.finalUrl)
+                    splitRuleAlternatives(tocUrlRule).firstNotNullOfOrNull { candidate ->
+                        selectLegadoElements(page, candidate).firstOrNull()?.let { extractValue(it, candidate) }
+                    }.orEmpty()
                 }
-            }else{
-                val doc=Jsoup.parse(response.body,response.finalUrl)
-                selectLegadoElements(doc,listRule).take(1000).mapNotNull{row->
-                    val title=extractValue(row,nameRule).ifBlank{row.text().trim()}
-                    val href=extractValue(row,urlRule).ifBlank{row.attr("href").ifBlank{row.selectFirst("a[href]")?.attr("href").orEmpty()}}
-                    if(title.isBlank()||href.isBlank())null else mapOf("title" to title,"url" to resolveUrl(tocUrl,href))
+                if (extracted.isNotBlank()) {
+                    val resolved = resolveUrl(response.finalUrl, extracted)
+                    if (resolved != tocUrl) {
+                        response = httpGetOrPost(resolved, baseUrl, null, headers)
+                        tocUrl = response.finalUrl
+                    }
                 }
             }
-            val msg=if(chapters.isNotEmpty())"目录解析成功，共 ${chapters.size} 章" else if(root!=null)"JSON 响应已收到，但目录规则未匹配：$listRule" else "页面已返回，但目录 CSS 规则未匹配：$listRule"
-            mapOf("chapters" to chapters,"status" to if(chapters.isEmpty())"empty" else "ok","message" to msg)
-        }catch(e:VerificationRequiredException){mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "verification_required","verificationUrl" to e.verificationUrl,"message" to (e.message?:"需要验证"))}
-        catch(e:Exception){mapOf("chapters" to emptyList<Map<String,String>>(),"status" to "error","message" to (e.message?:"目录请求失败"))}
+
+            val body = response.body
+            val document = Jsoup.parse(body, response.finalUrl)
+            val jsonRoot = runCatching { JsonParser.parseString(body).takeIf { it.isJsonObject || it.isJsonArray } }.getOrNull()
+            val chapters = mutableListOf<Map<String, String>>()
+
+            fun appendRow(row: JsonElement) {
+                val htmlRow = if (row.isJsonPrimitive && row.asJsonPrimitive.isString && row.asString.trimStart().startsWith("<"))
+                    Jsoup.parseBodyFragment(row.asString, tocUrl).body() else null
+                val title = when {
+                    htmlRow != null -> htmlFieldValue(htmlRow, nameRule, body, "", baseUrl, source, headers)
+                    row.isJsonPrimitive && nameRule.isBlank() -> stringValue(row)
+                    else -> jsonFieldValue(row, nameRule, body, "", baseUrl, source, headers)
+                }
+                val href = if (htmlRow != null) htmlFieldValue(htmlRow, urlRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, urlRule, body, "", baseUrl, source, headers)
+                if (title.isNotBlank() && href.isNotBlank()) chapters.add(mapOf("title" to title, "url" to resolveUrl(tocUrl, href)))
+            }
+
+            for (candidate in splitRuleAlternatives(listRule)) {
+                val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
+                when {
+                    jsRows != null -> jsRows.take(1000).forEach(::appendRow)
+                    candidate.trim().startsWith("$") -> {
+                        if (jsonRoot == null) continue
+                        readJsonPathMany(jsonRoot, candidate).flatMap { if (it.isJsonArray) it.asJsonArray.toList() else listOf(it) }
+                            .take(1000).forEach(::appendRow)
+                    }
+                    else -> {
+                        selectLegadoElements(document, candidate).take(1000).forEach { row ->
+                            val title = htmlFieldValue(row, nameRule, body, "", baseUrl, source, headers).ifBlank { row.text().trim() }
+                            val href = htmlFieldValue(row, urlRule, body, "", baseUrl, source, headers)
+                                .ifBlank { row.attr("href").ifBlank { row.selectFirst("a[href]")?.attr("href").orEmpty() } }
+                            if (title.isNotBlank() && href.isNotBlank()) chapters.add(mapOf("title" to title, "url" to resolveUrl(tocUrl, href)))
+                        }
+                    }
+                }
+                if (chapters.isNotEmpty()) break
+            }
+
+            val unique = chapters.distinctBy { it["url"] }
+            val pageTitle = runCatching { document.title().take(48) }.getOrDefault("")
+            val message = if (unique.isNotEmpty()) "目录解析成功，共 ${unique.size} 章"
+                else "源站已返回 HTTP ${response.code}（页面：${pageTitle.ifBlank { "无标题" }}），CSS / JSONPath / JS 候选规则均未匹配：$listRule"
+            mapOf("chapters" to unique, "status" to if (unique.isEmpty()) "empty" else "ok", "message" to message)
+        } catch (e: VerificationRequiredException) {
+            mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "verification_required",
+                "verificationUrl" to e.verificationUrl, "message" to (e.message ?: "需要验证"))
+        } catch (e: UnsupportedLegadoJsException) {
+            mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "unsupported_js",
+                "message" to (e.message ?: "目录 JS 规则暂不支持"))
+        } catch (e: Exception) {
+            mapOf("chapters" to emptyList<Map<String, String>>(), "status" to "error",
+                "message" to (e.message ?: "目录请求失败"))
+        }
     }
 
     fun fetchToc(bookUrl: String, sourceJson: String): List<Map<String, String>> {
@@ -1006,25 +1173,56 @@ object LegadoRuleEngine {
             val source = JsonParser.parseString(sourceJson).asJsonObject
             val baseUrl = stringValue(source.get("bookSourceUrl")).ifBlank { chapterUrl }
             val headers = stringValue(source.get("header"))
-            val contentRules = source.getAsJsonObject("ruleContent")
+            val rules = source.getAsJsonObject("ruleContent")
                 ?: return mapOf("content" to "", "status" to "invalid", "message" to "缺少正文规则")
-            val contentRule = stringValue(contentRules.get("content"))
-            if (contentRule.isBlank() || contentRule.contains("@js:", true) || contentRule.contains("<js>", true)) {
-                return mapOf("content" to "", "status" to "unsupported_js", "message" to "正文规则依赖 JS，当前版本暂不支持")
-            }
+            val contentRule = stringValue(rules.get("content")).trim()
+            if (contentRule.isBlank()) return mapOf("content" to "", "status" to "invalid", "message" to "ruleContent.content 为空")
             val response = httpGetOrPost(chapterUrl, baseUrl, null, headers)
-            val document = Jsoup.parse(response.body, response.finalUrl)
-            val node = document.selectFirst(toCss(contentRule.substringBefore('@')))
-                ?: return mapOf("content" to "", "status" to "empty", "message" to "未找到正文节点")
-            node.select("script, style, a, .ads, .advertisement").remove()
-            val content = Jsoup.parse(
-                node.html()
-                    .replace("(?i)<br\\s*/?>".toRegex(), "\n")
-                    .replace("(?i)</p>".toRegex(), "\n")
-            ).text()
-            mapOf("content" to content, "status" to if (content.isBlank()) "empty" else "ok", "message" to if (content.isBlank()) "正文为空" else "正文加载成功")
+            val body = response.body
+            val document = Jsoup.parse(body, response.finalUrl)
+            val jsonRoot = runCatching { JsonParser.parseString(body) }.getOrNull()
+            var content = ""
+
+            fun valueToText(value: JsonElement): String {
+                if (value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                    val raw = value.asString
+                    return if (raw.contains(Regex("(?is)<\\s*(p|br|div|section|article|h[1-6])\\b"))) {
+                        contentTextFromHtml(raw, response.finalUrl)
+                    } else raw.replace("\\r\\n", "\\n").replace('\\r', '\\n').trim()
+                }
+                return stringValue(value)
+            }
+
+            for (candidate in splitRuleAlternatives(contentRule)) {
+                val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
+                val extracted = when {
+                    jsRows != null -> jsRows.map(::valueToText).filter { it.isNotBlank() }.joinToString("\\n\\n")
+                    candidate.trim().startsWith("$") && jsonRoot != null ->
+                        readJsonPathMany(jsonRoot, candidate).map(::valueToText).filter { it.isNotBlank() }.joinToString("\\n\\n")
+                    else -> selectLegadoElements(document, candidate).map { node ->
+                        node.select("script,style,noscript,template,iframe,object,a,.ads,.advertisement").remove()
+                        extractTextPreservingParagraphs(node)
+                    }.filter { it.isNotBlank() }.joinToString("\\n\\n")
+                }
+                if (extracted.isNotBlank()) {
+                    content = extracted
+                    break
+                }
+            }
+
+            val normalized = content.replace('\u00A0', ' ').replace("\\r\\n", "\\n").replace('\\r', '\\n')
+                .replace(Regex("[\\t\\x0B\\f ]+"), " ").replace(Regex(" *\\n *"), "\\n")
+                .replace(Regex("\\n{3,}"), "\\n\\n").trim()
+            mapOf(
+                "content" to normalized,
+                "status" to if (normalized.isBlank()) "empty" else "ok",
+                "message" to if (normalized.isBlank()) "正文规则未匹配到文本，已尝试 CSS / JSONPath / JS 候选规则" else "正文加载成功，保留原始段落换行"
+            )
         } catch (e: VerificationRequiredException) {
-            mapOf("content" to "", "status" to "verification_required", "verificationUrl" to e.verificationUrl, "message" to (e.message ?: "需要人机验证"))
+            mapOf("content" to "", "status" to "verification_required", "verificationUrl" to e.verificationUrl,
+                "message" to (e.message ?: "需要人机验证"))
+        } catch (e: UnsupportedLegadoJsException) {
+            mapOf("content" to "", "status" to "unsupported_js", "message" to (e.message ?: "正文 JS 规则执行失败"))
         } catch (e: Exception) {
             mapOf("content" to "", "status" to "error", "message" to (e.message ?: "正文加载失败"))
         }
