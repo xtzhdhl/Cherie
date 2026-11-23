@@ -356,6 +356,66 @@ object LegadoRuleEngine {
         return selected
     }
 
+
+    /** Parse JSON returned directly or embedded in common HTML application-state scripts. */
+    private fun parseJsonPayloads(body: String, document: org.jsoup.nodes.Document): List<JsonElement> {
+        val parsed = mutableListOf<JsonElement>()
+        val seen = mutableSetOf<String>()
+
+        fun addCandidate(raw: String) {
+            val text = raw.trim().removePrefix("\uFEFF").trim()
+            if (text.isBlank() || text.length > 4_000_000 || !seen.add(text)) return
+            val normalized = text.removePrefix(")]}',").trimStart()
+            runCatching { JsonParser.parseString(normalized) }
+                .getOrNull()
+                ?.takeIf { it.isJsonObject || it.isJsonArray }
+                ?.let(parsed::add)
+        }
+
+        addCandidate(body)
+        document.select("script[type*=json], script#__NEXT_DATA__, script#__NUXT_DATA__, script#data, [data-json]")
+            .take(40)
+            .forEach { element ->
+                val raw = when {
+                    element.hasAttr("data-json") -> element.attr("data-json")
+                    else -> element.data().ifBlank { element.html() }
+                }
+                addCandidate(raw)
+            }
+
+        // Some sites put a JSON object/array inside a JavaScript assignment rather than a JSON script.
+        document.select("script:not([src])").take(40).forEach { script ->
+            val raw = script.data().ifBlank { script.html() }
+            val start = raw.indexOfFirst { it == '{' || it == '[' }
+            if (start < 0) return@forEach
+            val open = raw[start]
+            val close = if (open == '{') '}' else ']'
+            var depth = 0
+            var quote: Char? = null
+            var escaped = false
+            var end = -1
+            for (i in start until raw.length) {
+                val ch = raw[i]
+                if (quote != null) {
+                    if (escaped) escaped = false
+                    else if (ch == '\\') escaped = true
+                    else if (ch == quote) quote = null
+                    continue
+                }
+                when (ch) {
+                    '"', '\'' -> quote = ch
+                    open -> depth++
+                    close -> {
+                        depth--
+                        if (depth == 0) { end = i + 1; break }
+                    }
+                }
+            }
+            if (end > start) addCandidate(raw.substring(start, end))
+        }
+        return parsed.distinctBy { it.toString() }
+    }
+
     private fun jsonObjectString(obj: com.google.gson.JsonObject, key: String): String = stringValue(obj.get(key))
 
     private fun evalSourceJs(
@@ -401,6 +461,16 @@ object LegadoRuleEngine {
         return emptyList()
     }
 
+    private fun jsonPathFromRule(rule: String): String? {
+        val clean = rule.trim()
+        val path = when {
+            clean.startsWith("@Json:", true) -> clean.substringAfter(':').trim()
+            clean.startsWith("$") -> clean
+            else -> return null
+        }
+        return path.takeIf { it.startsWith("$") }
+    }
+
     private fun jsonFieldValue(
         row: JsonElement,
         rule: String,
@@ -421,7 +491,8 @@ object LegadoRuleEngine {
             val selected = if (selector.isBlank()) row else readJsonPath(row, selector) ?: JsonNull.INSTANCE
             return jsScalar(evalSourceJs(clean.substring(jsIndex), selected, responseBody, keyword, baseUrl, source, headers))
         }
-        return readJsonPath(row, clean)?.let(::stringValue).orEmpty()
+        val path = jsonPathFromRule(clean) ?: clean
+        return readJsonPath(row, path)?.let(::stringValue).orEmpty()
     }
 
     private fun htmlFieldValue(
@@ -1105,11 +1176,16 @@ object LegadoRuleEngine {
             val bookInfo = try { source.getAsJsonObject("ruleBookInfo") } catch (_: Exception) { null }
             val tocUrlRule = bookInfo?.get("tocUrl")?.takeUnless { it.isJsonNull }?.let(::stringValue).orEmpty()
             if (tocUrlRule.isNotBlank()) {
-                val jsonRoot = runCatching { JsonParser.parseString(response.body).takeIf { it.isJsonObject || it.isJsonArray } }.getOrNull()
+                val tocDocument = Jsoup.parse(response.body, response.finalUrl)
+                val jsonRoots = parseJsonPayloads(response.body, tocDocument)
+                val tocJsonPath = jsonPathFromRule(tocUrlRule)
                 val extracted = if (LegadoJsRuntime.isJsRule(tocUrlRule)) {
                     jsScalar(evalSourceJs(tocUrlRule, response.body, response.body, "", baseUrl, source, headers))
-                } else if (jsonRoot != null && (tocUrlRule.trim().startsWith("$") || !tocUrlRule.contains('<'))) {
-                    jsonRuleValue(jsonRoot, tocUrlRule)
+                } else if (tocJsonPath != null && jsonRoots.isNotEmpty()) {
+                    jsonRoots.asSequence().flatMap { readJsonPathMany(it, tocJsonPath).asSequence() }
+                        .map(::stringValue).firstOrNull { it.isNotBlank() }.orEmpty()
+                } else if (jsonRoots.isNotEmpty() && !tocUrlRule.contains('<')) {
+                    jsonRoots.asSequence().map { jsonRuleValue(it, tocUrlRule) }.firstOrNull { it.isNotBlank() }.orEmpty()
                 } else {
                     val page = Jsoup.parse(response.body, response.finalUrl)
                     splitRuleAlternatives(tocUrlRule).firstNotNullOfOrNull { candidate ->
@@ -1127,7 +1203,7 @@ object LegadoRuleEngine {
 
             val body = response.body
             val document = Jsoup.parse(body, response.finalUrl)
-            val jsonRoot = runCatching { JsonParser.parseString(body).takeIf { it.isJsonObject || it.isJsonArray } }.getOrNull()
+            val jsonRoots = parseJsonPayloads(body, document)
             val chapters = mutableListOf<Map<String, String>>()
 
             fun appendRow(row: JsonElement) {
@@ -1145,11 +1221,13 @@ object LegadoRuleEngine {
 
             for (candidate in splitRuleAlternatives(listRule)) {
                 val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
+                val jsonPath = jsonPathFromRule(candidate)
                 when {
                     jsRows != null -> jsRows.take(1000).forEach(::appendRow)
-                    candidate.trim().startsWith("$") -> {
-                        if (jsonRoot == null) continue
-                        readJsonPathMany(jsonRoot, candidate).flatMap { if (it.isJsonArray) it.asJsonArray.toList() else listOf(it) }
+                    jsonPath != null -> {
+                        if (jsonRoots.isEmpty()) continue
+                        jsonRoots.flatMap { root -> readJsonPathMany(root, jsonPath) }
+                            .flatMap { if (it.isJsonArray) it.asJsonArray.toList() else listOf(it) }
                             .take(1000).forEach(::appendRow)
                     }
                     else -> {
@@ -1198,7 +1276,7 @@ object LegadoRuleEngine {
             val response = httpGetOrPost(chapterUrl, baseUrl, null, headers)
             val body = response.body
             val document = Jsoup.parse(body, response.finalUrl)
-            val jsonRoot = runCatching { JsonParser.parseString(body) }.getOrNull()
+            val jsonRoots = parseJsonPayloads(body, document)
             var content = ""
 
             fun valueToText(value: JsonElement): String {
@@ -1213,10 +1291,12 @@ object LegadoRuleEngine {
 
             for (candidate in splitRuleAlternatives(contentRule)) {
                 val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
+                val jsonPath = jsonPathFromRule(candidate)
                 val extracted = when {
                     jsRows != null -> jsRows.map(::valueToText).filter { it.isNotBlank() }.joinToString("\n\n")
-                    candidate.trim().startsWith("$") && jsonRoot != null ->
-                        readJsonPathMany(jsonRoot, candidate).map(::valueToText).filter { it.isNotBlank() }.joinToString("\n\n")
+                    jsonPath != null && jsonRoots.isNotEmpty() ->
+                        jsonRoots.flatMap { readJsonPathMany(it, jsonPath) }.map(::valueToText)
+                            .filter { it.isNotBlank() }.joinToString("\n\n")
                     else -> selectLegadoElements(document, candidate).map { node ->
                         node.select("script,style,noscript,template,iframe,object,a,.ads,.advertisement").remove()
                         extractTextPreservingParagraphs(node)
