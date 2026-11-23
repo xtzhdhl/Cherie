@@ -583,23 +583,41 @@ object LegadoRuleEngine {
 
     private fun extractTextPreservingParagraphs(root: Element): String {
         val output = StringBuilder()
+
+        fun appendBreak(minimum: Int) {
+            if (output.isEmpty()) return
+            var trailing = 0
+            for (i in output.length - 1 downTo 0) {
+                if (output[i] == '\n') trailing++ else break
+            }
+            repeat((minimum - trailing).coerceAtLeast(0)) { output.append('\n') }
+        }
+
         NodeTraversor.traverse(object : NodeVisitor {
             override fun head(node: Node, depth: Int) {
                 when (node) {
                     is TextNode -> output.append(node.wholeText)
                     is Element -> when {
-                        node.normalName() == "br" -> output.append('\n')
-                        node.isBlock && output.isNotEmpty() && output.last() != '\n' -> output.append('\n')
+                        node.normalName() == "br" -> appendBreak(1)
+                        node.isBlock -> appendBreak(2)
                     }
                 }
             }
+
             override fun tail(node: Node, depth: Int) {
-                if (node is Element && node.isBlock && output.isNotEmpty() && output.last() != '\n') output.append('\n')
+                if (node is Element && node.isBlock) appendBreak(2)
             }
         }, root)
-        return output.toString().replace('\u00A0', ' ').replace("\r\n", "\n").replace('\r', '\n')
-            .replace(Regex("[\\t\\x0B\\f ]+"), " ").replace(Regex(" *\\n *"), "\n")
-            .replace(Regex("\\n{3,}"), "\n\n").trim()
+
+        return output.toString()
+            .replace('\u00A0', ' ')
+            .replace('\u3000', ' ')
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace(Regex("[ \\t]+\\n"), "\n")
+            .replace(Regex("\\n[ \\t]+"), "\n")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
     }
 
     private fun contentTextFromHtml(html: String, baseUrl: String): String {
@@ -1210,9 +1228,15 @@ object LegadoRuleEngine {
                 }
             }
 
-            val normalized = content.replace('\u00A0', ' ').replace("\r\n", "\n").replace('\r', '\n')
-                .replace(Regex("[\\t\\x0B\\f ]+"), " ").replace(Regex(" *\\n *"), "\n")
-                .replace(Regex("\\n{3,}"), "\n\n").trim()
+            val normalized = content
+                .replace('\u00A0', ' ')
+                .replace('\u3000', ' ')
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replace(Regex("[ \\t]+\\n"), "\n")
+                .replace(Regex("\\n[ \\t]+"), "\n")
+                .replace(Regex("\\n{3,}"), "\n\n")
+                .trim()
             mapOf(
                 "content" to normalized,
                 "status" to if (normalized.isBlank()) "empty" else "ok",
