@@ -1186,7 +1186,7 @@ object LegadoRuleEngine {
             fun valueToText(value: JsonElement): String {
                 if (value.isJsonPrimitive && value.asJsonPrimitive.isString) {
                     val raw = value.asString
-                    return if (raw.contains(Regex("(?is)<\\s*(p|br|div|section|article|h[1-6])\\b"))) {
+                    return if (raw.contains(Regex("(?is)<\\\\s*(p|br|div|section|article|h[1-6])\\\\b"))) {
                         contentTextFromHtml(raw, response.finalUrl)
                     } else raw.replace("\\r\\n", "\\n").replace('\\r', '\\n').trim()
                 }
@@ -1197,7 +1197,7 @@ object LegadoRuleEngine {
                 val jsRows = htmlRowsFromJs(candidate, document, body, "", baseUrl, source, headers)
                 val extracted = when {
                     jsRows != null -> jsRows.map(::valueToText).filter { it.isNotBlank() }.joinToString("\\n\\n")
-                    candidate.trim().startsWith("$") && jsonRoot != null ->
+                    candidate.trim().startsWith("\\$") && jsonRoot != null ->
                         readJsonPathMany(jsonRoot, candidate).map(::valueToText).filter { it.isNotBlank() }.joinToString("\\n\\n")
                     else -> selectLegadoElements(document, candidate).map { node ->
                         node.select("script,style,noscript,template,iframe,object,a,.ads,.advertisement").remove()
@@ -1210,9 +1210,9 @@ object LegadoRuleEngine {
                 }
             }
 
-            val normalized = content.replace('\u00A0', ' ').replace("\\r\\n", "\\n").replace('\\r', '\\n')
-                .replace(Regex("[\\t\\x0B\\f ]+"), " ").replace(Regex(" *\\n *"), "\\n")
-                .replace(Regex("\\n{3,}"), "\\n\\n").trim()
+            val normalized = content.replace('\\u00A0', ' ').replace("\\r\\n", "\\n").replace('\\r', '\\n')
+                .replace(Regex("[\\\\t\\\\x0B\\\\f ]+"), " ").replace(Regex(" *\\\\n *"), "\\n")
+                .replace(Regex("\\\\n{3,}"), "\\n\\n").trim()
             mapOf(
                 "content" to normalized,
                 "status" to if (normalized.isBlank()) "empty" else "ok",
