@@ -1587,8 +1587,8 @@
     }
 
     function normalizeGitHubRepo(value) {
-      let repo=String(value||'').trim().replace(/^https?:\\/\\/(www\\.)?github\\.com\\//i,'').replace(/\\.git$/i,'').replace(/\\/+$/,'');
-      return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(repo)?repo:'';
+      let repo=String(value||'').trim().replace(/^https?:\/\/(www\.)?github\.com\//i,'').replace(/\.git$/i,'').replace(/\/+$/,'');
+      return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)?repo:'';
     }
     function saveGitHubRepo() {
       const input=document.getElementById('github-repo-input'),clean=normalizeGitHubRepo(input.value);
