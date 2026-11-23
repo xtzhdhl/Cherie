@@ -2583,15 +2583,18 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
               JSON.stringify(book.sourceRaw)
             ]);
             if (res && res.status === 'verification_required') {
+              chapter.loadErrorMessage = '该书源需要人机验证。请完成验证后点击「重试本章」。';
               startSourceVerification(res.verificationUrl || chapter.url, book.sourceRaw);
               showToast('该书源正文需要人机验证，完成后请重新加载本章');
               return '';
             }
             if (res && res.status === 'unsupported_js') {
-              showToast(res.message || '该书源正文规则暂不支持');
+              chapter.loadErrorMessage = res.message || '此书源正文规则依赖暂不支持的 JavaScript。';
+              showToast(chapter.loadErrorMessage);
               return '';
             }
             const txt = (res && res.content) ? res.content : '';
+            if (!txt) chapter.loadErrorMessage = res?.message || '正文规则没有匹配到内容，请检查书源规则或尝试换源。';
             if (txt) {
               chapter.content = txt;
               return txt;
@@ -2750,7 +2753,7 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
 
       const text = await loadChapterContent(book, ch);
       const rendered = beautifyParagraphs(text, isReaderBeautify);
-      document.getElementById('reader-paragraphs').innerHTML = rendered || '<div class="lace-card rounded-2xl mx-3 mt-6 p-4 text-center space-y-2"><p class="text-sm font-medium">正文加载失败或解析结果为空</p><p class="text-xs opacity-70">请检查书源正文规则、网络或人机验证状态，然后重试。</p><button onclick="retryCurrentChapterContent()" class="satin-btn px-4 py-2 rounded-full text-xs">重试本章</button><button onclick="switchBookSourceFromReader()" class="px-4 py-2 rounded-full border text-xs">换源</button></div>;
+      document.getElementById('reader-paragraphs').innerHTML = rendered || '<div class="lace-card rounded-2xl mx-3 mt-6 p-4 text-center space-y-2"><p class="text-sm font-medium">正文加载失败或解析结果为空</p><p class="text-xs opacity-70">'+escapeHtml(ch.loadErrorMessage||'请检查书源正文规则、网络或人机验证状态，然后重试。')+'</p><button onclick="retryCurrentChapterContent()" class="satin-btn px-4 py-2 rounded-full text-xs">重试本章</button><button onclick="switchBookSourceFromReader()" class="px-4 py-2 rounded-full border text-xs">换源</button></div>;
       document.getElementById('reader-scroll-area').scrollTop = 0;
       updateHeroCard();
       saveAppState();
