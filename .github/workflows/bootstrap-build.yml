@@ -116,7 +116,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CherieRead-Android-APK-v1.3.5
+          name: CherieRead-Android-APK-v1.3.6
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30

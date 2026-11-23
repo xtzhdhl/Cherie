@@ -18,6 +18,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import com.google.gson.JsonNull
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.Charset
@@ -197,46 +198,27 @@ object LegadoRuleEngine {
         return result
     }
 
-    /**
-     * A useful subset of Legado's CAPTCHA bootstrap syntax is supported:
-     * `<js> ... java.ajax(baseUrl) ... java.startBrowserAwait(baseUrl, ...) ... </js>/search?...`.
-     * We probe the base page with the same OkHttp/WebView cookie jar. If it is challenged,
-     * the caller receives a verification URL and the UI opens an in-app WebView. Once the
-     * user completes the challenge, the trailing ordinary URL is requested normally.
-     * Other dynamic JavaScript URL builders are explicitly reported as unsupported rather
-     * than being sent to OkHttp as if they were literal URLs.
-     */
-    private fun resolveSearchUrl(rawSearchUrl: String, baseUrl: String, keyword: String, headersJson: String?): String {
+    private fun resolveSearchUrl(
+        rawSearchUrl: String,
+        baseUrl: String,
+        keyword: String,
+        headersJson: String?,
+        source: JsonElement? = null,
+        page: Int = 1
+    ): String {
         val raw = rawSearchUrl.trim()
+        if (!LegadoJsRuntime.isJsRule(raw)) return raw
         val match = Regex("(?is)^<js>(.*?)</js>(.*)$").matchEntire(raw)
-        if (match != null) {
-            val script = match.groupValues[1]
-            val suffix = match.groupValues[2].trim()
-            val hasInAppVerification = script.contains("java.startBrowserAwait", true)
-            val hasAjaxProbe = script.contains("java.ajax", true)
-            if (!hasInAppVerification || !hasAjaxProbe) {
-                throw UnsupportedLegadoJsException("搜索地址包含动态 JavaScript；当前版本只兼容带 java.startBrowserAwait 的常见人机验证前置规则")
-            }
-
-            val probe = requestText(baseUrl, baseUrl, null, headersJson)
-            if (looksLikeHtml(probe.body, probe.contentType) && isHumanVerification(probe.body)) {
-                throw VerificationRequiredException(probe.finalUrl, "该书源需要人机验证，请先在应用内打开验证页面")
-            }
-
-            // Leave Legado placeholders intact; requestText applies the source's declared charset.
-            val route = suffix
-            if (route.isBlank()) return baseUrl
-            return if (route.startsWith("?")) {
-                baseUrl.trimEnd('/') + route
-            } else {
-                resolveUrl(probe.finalUrl.ifBlank { baseUrl }, route)
-            }
-        }
-
-        if (raw.contains("<js>", true) || raw.startsWith("@js:", true)) {
-            throw UnsupportedLegadoJsException("搜索地址包含当前版本尚不能执行的 JavaScript 规则")
-        }
-        return raw
+        val jsRule = if (match != null) "<js>" + match.groupValues[1] + "</js>" else raw
+        val suffix = if (match != null) match.groupValues[2].trim() else ""
+        val output = LegadoJsRuntime.evaluate(
+            jsRule, rawSearchUrl, "", keyword, page, baseUrl, source, headersJson
+        ) { url, headers -> httpGetOrPost(url, baseUrl, keyword, headers ?: headersJson).body }
+        val resultUrl = if (output.isJsonPrimitive && output.asJsonPrimitive.isString) output.asString.trim() else ""
+        val base = if (resultUrl.startsWith("http://", true) || resultUrl.startsWith("https://", true)) resultUrl else baseUrl
+        if (suffix.isNotBlank()) return resolveUrl(base, suffix)
+        if (resultUrl.isNotBlank()) return resolveUrl(baseUrl, resultUrl)
+        throw UnsupportedLegadoJsException("搜索地址 JavaScript 没有生成可用 URL")
     }
 
     /** Convert Legado's class./id./tag. token syntax while also accepting ordinary CSS selectors. */
@@ -298,9 +280,12 @@ object LegadoRuleEngine {
         } } }
         return current
     }
-    private fun readJsonPath(root: JsonElement,path: String): JsonElement? {
-        val nodes=readJsonPathMany(root,path);if(nodes.isEmpty())return null;if(nodes.size==1)return nodes[0]
-        return com.google.gson.JsonArray().apply{nodes.forEach{add(it)}}
+    private fun readJsonPath(root: JsonElement, path: String): JsonElement? {
+        val normalized = if (path.trim().startsWith("$")) path.trim() else "$." + path.trim()
+        val nodes = readJsonPathMany(root, normalized)
+        if (nodes.isEmpty()) return null
+        if (nodes.size == 1) return nodes[0]
+        return com.google.gson.JsonArray().apply { nodes.forEach { add(it) } }
     }
     private fun jsonRuleValue(root: JsonElement,rule: String?): String {
         val clean=rule.orEmpty().trim().substringBefore('@');if(clean.isBlank())return ""
@@ -315,6 +300,117 @@ object LegadoRuleEngine {
     }
 
     private fun jsonObjectString(obj: com.google.gson.JsonObject, key: String): String = stringValue(obj.get(key))
+
+    private fun evalSourceJs(
+        rule: String,
+        result: Any?,
+        responseBody: String,
+        keyword: String,
+        baseUrl: String,
+        source: JsonElement,
+        headers: String
+    ): JsonElement = LegadoJsRuntime.evaluate(
+        rule, result, responseBody, keyword, 1, baseUrl, source, headers
+    ) { url, customHeaders -> httpGetOrPost(url, baseUrl, keyword, customHeaders ?: headers).body }
+
+    private fun jsScalar(value: JsonElement): String = when {
+        value.isJsonNull -> ""
+        value.isJsonPrimitive -> value.asString
+        else -> value.toString()
+    }
+
+    private fun jsRows(value: JsonElement): List<JsonElement> {
+        if (value.isJsonArray) return value.asJsonArray.toList()
+        if (value.isJsonObject) {
+            val obj = value.asJsonObject
+            listOf("books", "list", "data", "results", "items").forEach { key ->
+                val child = obj.get(key)
+                if (child != null && child.isJsonArray) return child.asJsonArray.toList()
+            }
+            return listOf(value)
+        }
+        if (value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+            val text = value.asString.trim()
+            val parsed = runCatching { JsonParser.parseString(text) }.getOrNull()
+            if (parsed != null) {
+                if (parsed.isJsonArray) return parsed.asJsonArray.toList()
+                if (parsed.isJsonObject) return jsRows(parsed)
+            }
+        }
+        return emptyList()
+    }
+
+    private fun jsonFieldValue(
+        row: JsonElement,
+        rule: String,
+        responseBody: String,
+        keyword: String,
+        baseUrl: String,
+        source: JsonElement,
+        headers: String
+    ): String {
+        val clean = rule.trim()
+        if (clean.isBlank()) return ""
+        if (clean.startsWith("<js>", true) || clean.startsWith("@js:", true)) {
+            return jsScalar(evalSourceJs(clean, row, responseBody, keyword, baseUrl, source, headers))
+        }
+        val jsIndex = clean.lastIndexOf("@js:", ignoreCase = true)
+        if (jsIndex >= 0) {
+            val selector = clean.substring(0, jsIndex).trim()
+            val selected = if (selector.isBlank()) row else readJsonPath(row, selector) ?: JsonNull.INSTANCE
+            return jsScalar(evalSourceJs(clean.substring(jsIndex), selected, responseBody, keyword, baseUrl, source, headers))
+        }
+        return readJsonPath(row, clean)?.let(::stringValue).orEmpty()
+    }
+
+    private fun htmlFieldValue(
+        row: Element,
+        rule: String,
+        responseBody: String,
+        keyword: String,
+        baseUrl: String,
+        source: JsonElement,
+        headers: String
+    ): String {
+        val clean = rule.trim()
+        if (clean.isBlank()) return ""
+        if (clean.startsWith("<js>", true) || clean.startsWith("@js:", true)) {
+            return jsScalar(evalSourceJs(clean, row.outerHtml(), responseBody, keyword, baseUrl, source, headers))
+        }
+        val jsIndex = clean.lastIndexOf("@js:", ignoreCase = true)
+        if (jsIndex >= 0) {
+            val prefix = clean.substring(0, jsIndex).trim()
+            val selected = if (prefix.isBlank()) row.outerHtml() else extractValue(row, prefix)
+            return jsScalar(evalSourceJs(clean.substring(jsIndex), selected, responseBody, keyword, baseUrl, source, headers))
+        }
+        return extractValue(row, clean)
+    }
+
+    private fun htmlRowsFromJs(
+        rule: String,
+        document: org.jsoup.nodes.Document,
+        responseBody: String,
+        keyword: String,
+        baseUrl: String,
+        source: JsonElement,
+        headers: String
+    ): List<JsonElement>? {
+        val clean = rule.trim().removePrefix("+").trim()
+        if (clean.startsWith("<js>", true) || clean.startsWith("@js:", true)) {
+            return jsRows(evalSourceJs(clean, responseBody, responseBody, keyword, baseUrl, source, headers))
+        }
+        val jsIndex = clean.lastIndexOf("@js:", ignoreCase = true)
+        if (jsIndex > 0) {
+            val prefix = clean.substring(0, jsIndex).trim()
+            val jsRule = clean.substring(jsIndex)
+            val values = selectLegadoElements(document, prefix).take(100).map { element ->
+                evalSourceJs(jsRule, element.outerHtml(), responseBody, keyword, baseUrl, source, headers)
+            }
+            return values.flatMap { value -> jsRows(value).ifEmpty { listOf(value) } }
+        }
+        return null
+    }
+
 
     private fun searchOneSource(sourceElement: JsonElement, queries: List<String>): SourceSearchResult {
         val emptyBooks = mutableListOf<Map<String, Any>>()
@@ -337,15 +433,6 @@ object LegadoRuleEngine {
                 "message" to "缺少 bookSourceUrl、searchUrl 或 ruleSearch.bookList"
             ))
         }
-        if (stringValue(searchRules.get("bookList")).contains("<js>", true) || stringValue(searchRules.get("bookList")).contains("@js:", true)) {
-            return SourceSearchResult(emptyBooks, mapOf(
-                "sourceName" to sourceName,
-                "sourceUrl" to sourceUrl,
-                "status" to "unsupported_js",
-                "message" to "此书源的搜索规则依赖 JavaScript；当前版本尚不能执行这类 JS 规则"
-            ))
-        }
-
         val bookListRule = stringValue(searchRules.get("bookList"))
         val nameRule = stringValue(searchRules.get("name"))
         val authorRule = stringValue(searchRules.get("author"))
@@ -358,25 +445,51 @@ object LegadoRuleEngine {
 
         for (keyword in queries.distinct().filter { it.isNotBlank() }.take(6)) {
             try {
-                val effectiveSearchUrl = resolveSearchUrl(searchUrl, baseUrl, keyword, headers)
+                val effectiveSearchUrl = resolveSearchUrl(searchUrl, baseUrl, keyword, headers, source)
                 val response = httpGetOrPost(effectiveSearchUrl, baseUrl, keyword, headers)
                 requestSucceeded = true
                 val body = response.body
                 val previousCount = emptyBooks.size
 
-                if (bookListRule.trim().startsWith("$")) {
+                val document = Jsoup.parse(body, response.finalUrl)
+                val jsListRows = htmlRowsFromJs(bookListRule, document, body, keyword, baseUrl, source, headers)
+                val normalizedListRule = bookListRule.trim().removePrefix("+").trim()
+                if (jsListRows != null) {
+                    for (item in jsListRows.take(8)) {
+                        val isHtmlRow = item.isJsonPrimitive && item.asJsonPrimitive.isString
+                        val htmlRow = if (isHtmlRow) Jsoup.parseBodyFragment(item.asString).body() else null
+                        val title = if (htmlRow != null) htmlFieldValue(htmlRow, nameRule, body, keyword, baseUrl, source, headers)
+                            else jsonFieldValue(item, nameRule, body, keyword, baseUrl, source, headers)
+                        val author = (if (htmlRow != null) htmlFieldValue(htmlRow, authorRule, body, keyword, baseUrl, source, headers)
+                            else jsonFieldValue(item, authorRule, body, keyword, baseUrl, source, headers)).ifBlank { "未知作者" }
+                        val bookPath = if (htmlRow != null) htmlFieldValue(htmlRow, bookUrlRule, body, keyword, baseUrl, source, headers)
+                            else jsonFieldValue(item, bookUrlRule, body, keyword, baseUrl, source, headers)
+                        if (title.isBlank() || bookPath.isBlank()) continue
+                        emptyBooks.add(mapOf(
+                            "name" to title,
+                            "author" to author,
+                            "bookUrl" to resolveUrl(response.finalUrl, bookPath),
+                            "intro" to if (htmlRow != null) htmlFieldValue(htmlRow, introRule, body, keyword, baseUrl, source, headers)
+                                else jsonFieldValue(item, introRule, body, keyword, baseUrl, source, headers),
+                            "sourceName" to sourceName,
+                            "sourceUrl" to sourceUrl,
+                            "sourceRaw" to source
+                        ))
+                    }
+                } else if (normalizedListRule.startsWith("$")) {
                     val jsonRoot = JsonParser.parseString(body)
-                    val array = readJsonPath(jsonRoot, bookListRule)
+                    val array = readJsonPath(jsonRoot, normalizedListRule)
                     if (array != null && array.isJsonArray) {
                         for (item in array.asJsonArray.take(8)) {
-                            val title = stringValue(readJsonPath(item, nameRule))
-                            val author = stringValue(readJsonPath(item, authorRule)).ifBlank { "未知作者" }
-                            val bookPath = stringValue(readJsonPath(item, bookUrlRule))
+                            val title = jsonFieldValue(item, nameRule, body, keyword, baseUrl, source, headers)
+                            val author = jsonFieldValue(item, authorRule, body, keyword, baseUrl, source, headers).ifBlank { "未知作者" }
+                            val bookPath = jsonFieldValue(item, bookUrlRule, body, keyword, baseUrl, source, headers)
                             if (title.isBlank() || bookPath.isBlank()) continue
                             emptyBooks.add(mapOf(
                                 "name" to title,
                                 "author" to author,
                                 "bookUrl" to resolveUrl(response.finalUrl, bookPath),
+                                "intro" to jsonFieldValue(item, introRule, body, keyword, baseUrl, source, headers),
                                 "sourceName" to sourceName,
                                 "sourceUrl" to sourceUrl,
                                 "sourceRaw" to source
@@ -384,17 +497,16 @@ object LegadoRuleEngine {
                         }
                     }
                 } else {
-                    val document = Jsoup.parse(body, response.finalUrl)
-                    val rows = selectLegadoElements(document, bookListRule).take(8)
+                    val rows = selectLegadoElements(document, normalizedListRule).take(8)
                     for (row in rows) {
-                        val title = extractValue(row, nameRule)
-                        val bookPath = extractValue(row, bookUrlRule)
+                        val title = htmlFieldValue(row, nameRule, body, keyword, baseUrl, source, headers)
+                        val bookPath = htmlFieldValue(row, bookUrlRule, body, keyword, baseUrl, source, headers)
                         if (title.isBlank() || bookPath.isBlank()) continue
                         emptyBooks.add(mapOf(
                             "name" to title,
-                            "author" to extractValue(row, authorRule).ifBlank { "未知作者" },
+                            "author" to htmlFieldValue(row, authorRule, body, keyword, baseUrl, source, headers).ifBlank { "未知作者" },
                             "bookUrl" to resolveUrl(response.finalUrl, bookPath),
-                            "intro" to extractValue(row, introRule),
+                            "intro" to htmlFieldValue(row, introRule, body, keyword, baseUrl, source, headers),
                             "sourceName" to sourceName,
                             "sourceUrl" to sourceUrl,
                             "sourceRaw" to source
@@ -479,7 +591,7 @@ object LegadoRuleEngine {
             return mapOf("sourceName" to sourceName, "status" to "invalid", "message" to "缺少 bookSourceUrl")
         }
         return try {
-            val probeUrl = if (searchUrl.isBlank()) baseUrl else resolveSearchUrl(searchUrl, baseUrl, "CherieRead", headers)
+            val probeUrl = if (searchUrl.isBlank()) baseUrl else resolveSearchUrl(searchUrl, baseUrl, "CherieRead", headers, source)
             val response = requestText(probeUrl, baseUrl, "CherieRead", headers)
             when {
                 looksLikeHtml(response.body, response.contentType) && isHumanVerification(response.body) -> mapOf(

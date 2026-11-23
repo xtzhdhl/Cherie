@@ -15,8 +15,8 @@ android {
         applicationId = "com.cherie.read"
         minSdk = 24
         targetSdk = 34
-        versionCode = 135
-        versionName = "1.3.5"
+        versionCode = 136
+        versionName = "1.3.6"
     }
 
     signingConfigs {
@@ -57,4 +57,5 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("org.jsoup:jsoup:1.18.1")
+    implementation("org.mozilla:rhino:1.7.15")
 }
