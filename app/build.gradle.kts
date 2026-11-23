@@ -3,6 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val cherieSigningPassword = providers.environmentVariable("CHERIE_SIGNING_PASSWORD").orNull
+val cherieSigningStoreFile = rootProject.file("cherie-release.p12")
+val hasCherieStableSigning = cherieSigningStoreFile.exists() && !cherieSigningPassword.isNullOrBlank()
+
 android {
     namespace = "com.cherie.read"
     compileSdk = 34
@@ -11,13 +15,30 @@ android {
         applicationId = "com.cherie.read"
         minSdk = 24
         targetSdk = 34
-        versionCode = 134
-        versionName = "1.3.4"
+        versionCode = 135
+        versionName = "1.3.5"
+    }
+
+    signingConfigs {
+        create("cherieStable") {
+            storeFile = cherieSigningStoreFile
+            storePassword = cherieSigningPassword ?: ""
+            keyAlias = "cherie-release"
+            keyPassword = cherieSigningPassword ?: ""
+        }
     }
 
     buildTypes {
+        debug {
+            if (hasCherieStableSigning) {
+                signingConfig = signingConfigs.getByName("cherieStable")
+            }
+        }
         release {
             isMinifyEnabled = false
+            if (hasCherieStableSigning) {
+                signingConfig = signingConfigs.getByName("cherieStable")
+            }
         }
     }
     compileOptions {

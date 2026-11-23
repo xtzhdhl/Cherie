@@ -5,11 +5,7 @@ on:
     branches: [ main ]
     tags: [ 'v*' ]
     paths:
-      - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
-      - '.github/workflows/bootstrap-build.yml'
-      - 'app/**'
-      - '*.gradle.kts'
-      - 'gradle.properties'
+      - 'app/src/main/java/**'
   workflow_dispatch:
 
 permissions:
@@ -76,8 +72,45 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build APK
-        run: gradle assembleDebug --no-daemon
+      - name: Restore permanent signing keystore
+        shell: bash
+        env:
+          CHERIE_KEYSTORE_BASE64: ${{ secrets.CHERIE_KEYSTORE_BASE64 }}
+          CHERIE_SIGNING_PASSWORD: ${{ secrets.CHERIE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CHERIE_KEYSTORE_BASE64:-}" || -z "${CHERIE_SIGNING_PASSWORD:-}" ]]; then
+            echo "::error::Missing CHERIE_KEYSTORE_BASE64 or CHERIE_SIGNING_PASSWORD. Add both Repository Secrets before building."
+            exit 1
+          fi
+          printf '%s' "$CHERIE_KEYSTORE_BASE64" | base64 --decode > cherie-release.p12
+          test -s cherie-release.p12
+          chmod 600 cherie-release.p12
+          keytool -list -keystore cherie-release.p12 -storetype PKCS12 -storepass "$CHERIE_SIGNING_PASSWORD" -alias cherie-release >/dev/null
+
+      - name: Build APK with permanent signature
+        env:
+          CHERIE_SIGNING_PASSWORD: ${{ secrets.CHERIE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${CHERIE_SIGNING_PASSWORD:-}" || { echo "::error::Missing CHERIE_SIGNING_PASSWORD."; exit 1; }
+          gradle assembleDebug --no-daemon
+
+      - name: Verify APK signature and certificate
+        env:
+          CHERIE_SIGNING_PASSWORD: ${{ secrets.CHERIE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APK_SIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -s "$APK"
+          "$APK_SIGNER" verify --verbose "$APK"
+          APK_CERT=$("$APK_SIGNER" verify --print-certs "$APK" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1 | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')
+          KEY_CERT=$(keytool -exportcert -keystore cherie-release.p12 -storetype PKCS12 -storepass "$CHERIE_SIGNING_PASSWORD" -alias cherie-release | sha256sum | cut -d' ' -f1)
+          echo "APK signing certificate: $APK_CERT"
+          echo "Keystore certificate:     $KEY_CERT"
+          test -n "$APK_CERT"
+          test "$APK_CERT" = "$KEY_CERT"
 
       - name: Verify APK
         run: test -s app/build/outputs/apk/debug/app-debug.apk
@@ -85,7 +118,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CherieRead-Android-APK-v1.3.4
+          name: CherieRead-Android-APK-v1.3.5
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
