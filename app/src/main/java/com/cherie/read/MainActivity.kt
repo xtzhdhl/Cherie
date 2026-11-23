@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = true
             allowContentAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = "$systemUserAgent CherieReadAPK/1.3.4"
+            userAgentString = "$systemUserAgent CherieReadAPK/${BuildConfig.VERSION_NAME}"
         }
 
         webView.addJavascriptInterface(CherieJsBridge(), "CherieNative")
@@ -84,6 +84,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class CherieJsBridge {
+        @JavascriptInterface
+        fun getAppVersion(): String = BuildConfig.VERSION_NAME
+
+        @JavascriptInterface
+        fun getAppVersionCode(): Int = BuildConfig.VERSION_CODE
+
         @JavascriptInterface
         fun importSourcesFromUrl(url: String, cbId: String) {
             scope.launch {
