@@ -62,7 +62,27 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.addJavascriptInterface(CherieJsBridge(), "CherieNative")
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Force the APK into the real app surface even if web bootstrap fails.
+                view?.evaluateJavascript("""
+                    (function(){
+                      document.body && document.body.classList.add('apk-fullscreen');
+                      var style=document.getElementById('cherie-native-fullscreen-fallback');
+                      if(!style){style=document.createElement('style');style.id='cherie-native-fullscreen-fallback';style.textContent=
+                        '#web-studio-header,#apk-builder-panel,#mobile-web-switcher,#mock-status-bar{display:none!important}'+
+                        '#studio-main{padding:0!important;max-width:100%!important;margin:0!important}'+
+                        '#studio-layout{display:block!important}#phone-column{display:block!important;width:100vw!important;max-width:100vw!important;height:100dvh!important}'+
+                        '.phone-chassis{padding:0!important;border-radius:0!important;box-shadow:none!important;background:transparent!important;max-width:100vw!important;width:100vw!important;height:100dvh!important}'+
+                        '.phone-screen{border-radius:0!important;height:100dvh!important;width:100vw!important;box-shadow:none!important}';
+                        document.head.appendChild(style);
+                      }
+                      try{if(typeof setMobileStudioTab==='function')setMobileStudioTab('app');}catch(e){}
+                    })();
+                """.trimIndent(), null)
+            }
+        }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 wv: WebView?,
