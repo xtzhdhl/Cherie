@@ -15,8 +15,8 @@ android {
         applicationId = "com.cherie.read"
         minSdk = 24
         targetSdk = 34
-        versionCode = 139
-        versionName = "1.3.9"
+        versionCode = 140
+        versionName = "1.4.0"
     }
 
     signingConfigs {
