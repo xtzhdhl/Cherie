@@ -1571,6 +1571,11 @@
         hd.classList.add(readerFontClass);
         para.style.lineHeight = String(readerLineHeight);
         para.style.fontSize = `${readerFontSize}px`;
+        para.querySelectorAll('p').forEach(p => {
+          p.style.lineHeight = String(readerLineHeight);
+          p.style.fontSize = `${readerFontSize}px`;
+          p.style.textAlign = 'left';
+        });
       }
       document.querySelectorAll('.rf-btn').forEach(b => {
         const active = b.getAttribute('data-rfont') === readerFontClass;
@@ -2310,7 +2315,7 @@ async function openBookstoreCategory(i){
   section.scrollIntoView({behavior:'smooth',block:'start'});
   await fetchBookstorePage(false);
 }
-async function fetchBookstorePage(append){if(!currentBookstoreCategory)return;const c=currentBookstoreCategory,s=bookstoreSources.find(x=>sourceDiagnosticId(x)===c.sourceId);if(!s){document.getElementById('bookstore-results-subtitle').textContent='找不到书源，请刷新分类。';return;}const raw=sourceRawForNative(s);try{const res=await callNativeAsync('exploreBooksNative',[JSON.stringify(raw),c.url,String(currentBookstorePage)],120000);if(res?.status==='verification_required'){document.getElementById('bookstore-results-subtitle').textContent='该书源需要人机验证';if(res.verificationUrl)startSourceVerification(res.verificationUrl,raw);return;}if(!res||!Array.isArray(res.books))throw new Error(res?.message||'没有返回书目');const mapped=res.books.map((x,i)=>({id:'store_'+(x.bookUrl||i)+'_'+(x.sourceUrl||''),type:'legado',title:x.name||'未命名书籍',author:x.author||'未知作者',sourceName:x.sourceName||c.sourceName||'书源',sourceRaw:x.sourceRaw||raw,bookUrl:x.bookUrl,tocUrl:x.bookUrl,coverUrl:x.coverUrl||'',coverClass:'cover-'+((bookstoreBooks.length+i)%4+1),badge:x.kind||c.categoryName||'书城',intro:x.intro||x.lastChapter||x.wordCount||''}));const seen=new Set(bookstoreBooks.map(x=>x.bookUrl));bookstoreBooks=append?bookstoreBooks.concat(mapped.filter(x=>x.bookUrl&&!seen.has(x.bookUrl))):mapped;document.getElementById('bookstore-results-subtitle').textContent=(res.message||'加载完成')+' · 第 '+currentBookstorePage+' 页';renderBookstoreBooks();}catch(e){document.getElementById('bookstore-results-subtitle').textContent='加载失败：'+(e?.message||'网络错误');document.getElementById('bookstore-results-list').innerHTML='<div class="lace-card p-4 text-center text-rose-500">'+escapeHtml(e?.message||'网络错误')+'</div>';}}
+async function fetchBookstorePage(append){if(!currentBookstoreCategory)return;const c=currentBookstoreCategory,s=bookstoreSources[Number(c.sourceIndex)]||bookstoreSources.find(x=>sourceDiagnosticId(x)===c.sourceId);if(!s){document.getElementById('bookstore-results-subtitle').textContent='找不到书源，请刷新分类。';return;}const raw=sourceRawForNative(s);try{const res=await callNativeAsync('exploreBooksNative',[JSON.stringify(raw),c.url,String(currentBookstorePage)],120000);if(res?.status==='verification_required'){document.getElementById('bookstore-results-subtitle').textContent='该书源需要人机验证';if(res.verificationUrl)startSourceVerification(res.verificationUrl,raw);return;}if(!res||!Array.isArray(res.books))throw new Error(res?.message||'没有返回书目');const mapped=res.books.map((x,i)=>({id:'store_'+(x.bookUrl||i)+'_'+(x.sourceUrl||''),type:'legado',title:x.name||'未命名书籍',author:x.author||'未知作者',sourceName:x.sourceName||c.sourceName||'书源',sourceRaw:x.sourceRaw||raw,bookUrl:x.bookUrl,tocUrl:x.bookUrl,coverUrl:x.coverUrl||'',coverClass:'cover-'+((bookstoreBooks.length+i)%4+1),badge:x.kind||c.categoryName||'书城',intro:x.intro||x.lastChapter||x.wordCount||''}));const seen=new Set(bookstoreBooks.map(x=>x.bookUrl));bookstoreBooks=append?bookstoreBooks.concat(mapped.filter(x=>x.bookUrl&&!seen.has(x.bookUrl))):mapped;document.getElementById('bookstore-results-subtitle').textContent=(res.message||'加载完成')+' · 第 '+currentBookstorePage+' 页';renderBookstoreBooks();}catch(e){document.getElementById('bookstore-results-subtitle').textContent='加载失败：'+(e?.message||'网络错误');document.getElementById('bookstore-results-list').innerHTML='<div class="lace-card p-4 text-center text-rose-500">'+escapeHtml(e?.message||'网络错误')+'</div>';}}
 async function loadMoreBookstoreBooks(){if(!currentBookstoreCategory||bookstoreLoading)return;bookstoreLoading=true;currentBookstorePage++;await fetchBookstorePage(true);bookstoreLoading=false;}
 function renderBookstoreBooks(){const c=document.getElementById('bookstore-results-list');if(!bookstoreBooks.length){c.innerHTML='<div class="lace-card p-4 text-center text-[10px]">该分类没有解析到书目，可能规则不匹配或站点验证。</div>';return;}c.innerHTML=bookstoreBooks.map((x,i)=>{const exists=books.some(b=>b.bookUrl===x.bookUrl&&b.sourceName===x.sourceName);return '<div class="lace-card rounded-2xl p-3 flex gap-3 items-center"><div class="w-12 h-16 rounded-xl '+x.coverClass+' p-1.5 flex flex-col justify-between shrink-0"><span class="text-[7px] text-white self-end px-1 rounded bg-black/15">'+escapeHtml(x.badge||'书城')+'</span><span class="text-[9px] text-white line-clamp-2">'+escapeHtml(x.title)+'</span></div><div class="flex-1 min-w-0"><h4 class="text-xs text-cocoa-700 font-song truncate">'+escapeHtml(x.title)+'</h4><p class="text-[10px] text-cocoa-500 truncate">'+escapeHtml(x.author)+' · '+escapeHtml(x.sourceName)+'</p><p class="text-[9px] text-cocoa-400 line-clamp-2">'+escapeHtml(x.intro||'')+'</p><div class="flex gap-1.5 mt-2"><button onclick="addBookstoreResult('+i+',false)" class="px-2.5 py-1 rounded-full text-[10px] border">'+(exists?'已在书架':'+ 加入书架')+'</button><button onclick="addBookstoreResult('+i+',true)" class="satin-btn px-3 py-1 rounded-full text-[10px]">立即阅读</button></div></div></div>';}).join('');}
 function addBookstoreResult(i,openNow){const x=bookstoreBooks[i];if(!x)return;let existing=books.find(b=>b.bookUrl===x.bookUrl&&b.sourceName===x.sourceName);if(!existing){existing={...x,lastChapterIdx:0,lastReadAt:Date.now(),pinned:false,chapters:[]};books.unshift(existing);saveAppState();renderBookshelf();if(!openNow)showToast('已加入书架：《'+x.title+'》');}if(openNow)openReader(existing.id,existing.lastChapterIdx||0);}
@@ -2911,13 +2916,17 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
     function changeReaderFontSize(delta) {
       readerFontSize = Math.min(22, Math.max(12, readerFontSize + delta));
       document.getElementById('reader-size-label').textContent = readerFontSize.toFixed(1);
-      document.getElementById('reader-paragraphs').style.fontSize = `${readerFontSize}px`;
+      const paragraphs = document.getElementById('reader-paragraphs');
+      paragraphs.style.fontSize = `${readerFontSize}px`;
+      paragraphs.querySelectorAll('p').forEach(p => p.style.fontSize = `${readerFontSize}px`);
       saveAppState();
     }
 
     function setReaderLineHeight(lh) {
       readerLineHeight = lh;
-      document.getElementById('reader-paragraphs').style.lineHeight = String(lh);
+      const paragraphs = document.getElementById('reader-paragraphs');
+      paragraphs.style.lineHeight = String(lh);
+      paragraphs.querySelectorAll('p').forEach(p => p.style.lineHeight = String(lh));
       document.querySelectorAll('.lh-btn').forEach(b => {
         const active = Number(b.getAttribute('data-lh')) === lh;
         b.classList.toggle('bg-blush-100', active);
