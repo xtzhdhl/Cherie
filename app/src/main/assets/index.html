@@ -187,6 +187,7 @@
     .theme-rose { background: #FDF3F6; color: #5A3E44; }
     .theme-amber { background: #F6ECD9; color: #4A3B28; }
     .theme-velvet { background: #231D20; color: #E7D9D5; }
+    .theme-leaf { background: #C8DDB7; color: #596D4E; }
 
     /* Editorial Book Cover Gradients */
     .cover-1 { background: linear-gradient(160deg, #F7DDE4 0%, #E7C1CE 48%, #C998A8 100%); }
@@ -796,7 +797,7 @@
                     <button onclick="setReaderTheme('theme-cream')" title="奶油纸" class="w-5 h-5 rounded-full bg-[#FFFBF5] border-2 border-champagne-400"></button>
                     <button onclick="setReaderTheme('theme-rose')" title="蔷薇纱" class="w-5 h-5 rounded-full bg-[#FDF3F6] border border-blush-300"></button>
                     <button onclick="setReaderTheme('theme-amber')" title="琥珀护眼" class="w-5 h-5 rounded-full bg-[#F6ECD9] border border-champagne-400"></button>
-                    <button onclick="setReaderTheme('theme-velvet')" title="丝绒夜读" class="w-5 h-5 rounded-full bg-[#231D20] border border-cocoa-500"></button>
+                    <button onclick="setReaderTheme('theme-velvet')" title="丝绒夜读" class="w-5 h-5 rounded-full bg-[#231D20] border border-cocoa-500"></button><button onclick="setReaderTheme('theme-leaf')" title="草绿阅读" class="w-5 h-5 rounded-full border border-[#91B17D]" style="background:#C8DDB7"></button>
                   </div>
                   <div class="flex items-center gap-1">
                     <button onclick="openReaderSheet('toc')" class="px-2.5 py-1 rounded-full bg-cream-100 border border-champagne-200 text-[10px] font-hei flex items-center gap-1">
@@ -1567,7 +1568,7 @@
       document.querySelectorAll('.ui-font-btn').forEach(b=>{const active=b.dataset.uiFont===appUiFontClass;b.classList.toggle('bg-blush-100',active);b.classList.toggle('border-blush-300',active);b.classList.toggle('bg-white',!active);b.classList.toggle('border-champagne-200',!active);});
       const view = document.getElementById('app-view-reader');
       if (view) {
-        view.classList.remove('theme-cream', 'theme-rose', 'theme-amber', 'theme-velvet');
+        view.classList.remove('theme-cream', 'theme-rose', 'theme-amber', 'theme-velvet', 'theme-leaf');
         view.classList.add(readerThemeClass);
       }
       const para = document.getElementById('reader-paragraphs');
@@ -2997,7 +2998,7 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
     function setReaderTheme(themeCls) {
       readerThemeClass = themeCls;
       const view = document.getElementById('app-view-reader');
-      view.classList.remove('theme-cream', 'theme-rose', 'theme-amber', 'theme-velvet');
+      view.classList.remove('theme-cream', 'theme-rose', 'theme-amber', 'theme-velvet', 'theme-leaf');
       view.classList.add(themeCls);
       saveAppState();
     }
