@@ -5,10 +5,6 @@ on:
     branches: [ main ]
     paths:
       - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
-      - '.github/workflows/bootstrap-build.yml'
-      - 'app/**'
-      - '*.gradle.kts'
-      - 'gradle.properties'
   workflow_dispatch:
 
 permissions:
@@ -22,23 +18,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Expand project ZIP
+      - name: Expand project ZIP when supplied
         shell: bash
         run: |
           set -euo pipefail
           ARCHIVE="CherieRead-v1.3.3-GitHub-APK-Project.zip"
-          if [[ ! -f "$ARCHIVE" ]]; then
-            echo "Please upload $ARCHIVE to the repository root, then run this workflow."
-            exit 1
+          if [[ -f "$ARCHIVE" ]]; then
+            unzip -t "$ARCHIVE"
+            mkdir -p "$RUNNER_TEMP/cherie"
+            unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/cherie"
+            cp -a "$RUNNER_TEMP/cherie/." .
+            # Keep workflow files managed directly through the GitHub API.
+            rm -f .github/workflows/build-apk.yml
+            rm -f "$ARCHIVE"
+          else
+            echo "No bootstrap ZIP found; building the existing repository checkout."
           fi
-          unzip -t "$ARCHIVE"
-          mkdir -p "$RUNNER_TEMP/cherie"
-          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/cherie"
-          cp -a "$RUNNER_TEMP/cherie/." .
-          # Avoid pushing workflow files: the connected GitHub App lacks
-          # the dedicated workflow permission. Keep this workflow as builder.
-          rm -f .github/workflows/build-apk.yml
-          rm -f "$ARCHIVE"
 
       - name: Commit expanded project
         shell: bash
