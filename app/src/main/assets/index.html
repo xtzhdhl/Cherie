@@ -1439,7 +1439,8 @@
       const raw = normalized.raw || {};
       const signature = JSON.stringify([
         normalized.name, normalized.url, raw.searchUrl || '', raw.header || '',
-        raw.ruleSearch || null, raw.ruleBookInfo || null, raw.ruleToc || null, raw.ruleContent || null
+        raw.ruleSearch || null, raw.ruleBookInfo || null, raw.ruleToc || null, raw.ruleContent || null,
+        raw.exploreUrl || null, raw.ruleExplore || null
       ]);
       let hash = 2166136261;
       for (let i = 0; i < signature.length; i++) {
@@ -2632,15 +2633,16 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
         .replace(/最新章节[^\n]*无弹窗[^\n]*/g, '');
 
       const lines = cleaned.split(/\n+/).map(l => l.trim()).filter(Boolean);
+      const paragraphStyle = `line-height:${readerLineHeight};font-size:${readerFontSize}px;text-align:left;letter-spacing:0.015em;white-space:normal;word-break:normal;overflow-wrap:anywhere;`;
       if (!beautifyOn) {
-        return lines.map(l => `<p class="opacity-85">${escapeHtml(l)}</p>`).join('');
+        return lines.map(l => `<p style="${paragraphStyle}" class="reader-paragraph opacity-90">${escapeHtml(l)}</p>`).join('');
       }
       return lines.map(l => {
         const polished = l
           .replace(/"([^"]+)"/g, '「$1」')
           .replace(/“([^”]+)”/g, '「$1」')
           .replace(/,/g, '，');
-        return `<p class="indent-[2em] text-justify">${escapeHtml(polished)}</p>`;
+        return `<p style="${paragraphStyle}" class="reader-paragraph reader-paragraph-beautified">${escapeHtml(polished)}</p>`;
       }).join('');
     }
 
