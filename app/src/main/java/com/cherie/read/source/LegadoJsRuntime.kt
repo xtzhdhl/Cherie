@@ -145,7 +145,7 @@ internal object LegadoJsRuntime {
             cx.languageVersion = Context.VERSION_ES6
             cx.instructionObserverThreshold = 100000
             cx.maximumInterpreterStackDepth = 100
-            cx.classShutter = ClassShutter { _ -> false }
+            cx.setClassShutter(ClassShutter { _ -> false })
 
             val scope = cx.initSafeStandardObjects()
             ScriptableObject.putProperty(scope, "result", toScriptValue(result, scope) ?: Undefined.instance)

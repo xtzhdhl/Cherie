@@ -19,6 +19,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import com.google.gson.JsonNull
+import com.google.gson.JsonPrimitive
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.Charset
@@ -552,6 +553,169 @@ object LegadoRuleEngine {
         return SourceSearchResult(emptyBooks, statusMap)
     }
 
+    private fun exploreEntries(source: JsonElement, baseUrl: String): List<Pair<String, String>> {
+        val value = if (source.isJsonObject) source.asJsonObject.get("exploreUrl") else null
+        if (value == null || value.isJsonNull) return emptyList()
+        val out = mutableListOf<Pair<String, String>>()
+        fun add(title: String, url: String) {
+            val cleanUrl = url.trim()
+            if (cleanUrl.isBlank()) return
+            val resolved = resolveUrl(baseUrl, cleanUrl)
+            if (out.none { it.second == resolved }) out.add(title.trim().ifBlank { "发现" } to resolved)
+        }
+        when {
+            value.isJsonArray -> value.asJsonArray.forEachIndexed { index, item ->
+                if (item.isJsonObject) {
+                    val title = stringValue(item.asJsonObject.get("title") ?: item.asJsonObject.get("name"))
+                    val url = stringValue(item.asJsonObject.get("url") ?: item.asJsonObject.get("exploreUrl"))
+                    add(title.ifBlank { "分类 " + (index + 1) }, url)
+                } else add("分类 " + (index + 1), stringValue(item))
+            }
+            value.isJsonObject -> value.asJsonObject.entrySet().forEach { (title, url) -> add(title, stringValue(url)) }
+            else -> {
+                val raw = stringValue(value).replace("\\r\\n", "\n").replace("\\r", "\n")
+                raw.lineSequence().map { it.trim() }.filter { it.isNotBlank() && !it.startsWith("#") }.forEach { line ->
+                    val parts = line.split("::", limit = 2)
+                    if (parts.size == 2) add(parts[0], parts[1])
+                    else if (line.startsWith("http://", true) || line.startsWith("https://", true)) add("发现", line)
+                }
+            }
+        }
+        return out
+    }
+
+    /** Read exploreUrl categories from enabled sources. */
+    fun exploreCategories(sourcesJson: String): List<Map<String, String>> {
+        val sources = try { JsonParser.parseString(sourcesJson).asJsonArray.toList() } catch (_: Exception) { emptyList() }
+        return sources.filter { it.isJsonObject }.flatMap { source ->
+            val obj = source.asJsonObject
+            if (obj.has("enabled") && !obj.get("enabled").isJsonNull &&
+                !runCatching { obj.get("enabled").asBoolean }.getOrDefault(true)) return@flatMap emptyList()
+            val baseUrl = stringValue(obj.get("bookSourceUrl"))
+            if (baseUrl.isBlank()) return@flatMap emptyList()
+            val sourceName = stringValue(obj.get("bookSourceName")).ifBlank { "Legado 书源" }
+            val sourceId = stringValue(obj.get("_cherieSourceId"))
+            exploreEntries(source, baseUrl).map { entry ->
+                mapOf("sourceId" to sourceId, "sourceName" to sourceName, "categoryName" to entry.first,
+                    "url" to entry.second, "bookSourceUrl" to baseUrl)
+            }
+        }
+    }
+
+    /** Fetch one category page with the source's ruleExplore selectors. */
+    fun exploreBooksDetailed(sourceJson: String, categoryUrl: String, page: Int = 1): Map<String, Any> {
+        val empty = emptyList<Map<String, Any>>()
+        return try {
+            val source = JsonParser.parseString(sourceJson).asJsonObject
+            val sourceName = stringValue(source.get("bookSourceName")).ifBlank { "Legado 书源" }
+            val baseUrl = stringValue(source.get("bookSourceUrl"))
+            val headers = stringValue(source.get("header"))
+            val rules = source.getAsJsonObject("ruleExplore")
+                ?: return mapOf("books" to empty, "status" to "no_explore", "message" to "该书源没有配置 ruleExplore")
+            val listRule = stringValue(rules.get("bookList")).trim()
+            if (baseUrl.isBlank() || listRule.isBlank()) {
+                return mapOf("books" to empty, "status" to "invalid", "message" to "缺少 bookSourceUrl 或 ruleExplore.bookList")
+            }
+            val requestUrl = categoryUrl.replace("{{page}}", page.coerceAtLeast(1).toString())
+            val response = httpGetOrPost(requestUrl, baseUrl, null, headers)
+            val body = response.body
+            val document = Jsoup.parse(body, response.finalUrl)
+            val nameRule = stringValue(rules.get("name"))
+            val authorRule = stringValue(rules.get("author"))
+            val bookUrlRule = stringValue(rules.get("bookUrl"))
+            val introRule = stringValue(rules.get("intro"))
+            val coverRule = stringValue(rules.get("coverUrl"))
+            val kindRule = stringValue(rules.get("kind"))
+            val lastChapterRule = stringValue(rules.get("lastChapter"))
+            val wordCountRule = stringValue(rules.get("wordCount"))
+            val books = mutableListOf<Map<String, Any>>()
+            val jsRows = htmlRowsFromJs(listRule, document, body, "", baseUrl, source, headers)
+
+            fun appendJsonRow(row: JsonElement) {
+                val isHtml = row.isJsonPrimitive && row.asJsonPrimitive.isString
+                val htmlRow = if (isHtml) Jsoup.parseBodyFragment(row.asString).body() else null
+                val title = if (htmlRow != null) htmlFieldValue(htmlRow, nameRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, nameRule, body, "", baseUrl, source, headers)
+                val href = if (htmlRow != null) htmlFieldValue(htmlRow, bookUrlRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, bookUrlRule, body, "", baseUrl, source, headers)
+                if (title.isBlank() || href.isBlank()) return
+                val author = if (htmlRow != null) htmlFieldValue(htmlRow, authorRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, authorRule, body, "", baseUrl, source, headers)
+                val intro = if (htmlRow != null) htmlFieldValue(htmlRow, introRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, introRule, body, "", baseUrl, source, headers)
+                val cover = if (htmlRow != null) htmlFieldValue(htmlRow, coverRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, coverRule, body, "", baseUrl, source, headers)
+                val kind = if (htmlRow != null) htmlFieldValue(htmlRow, kindRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, kindRule, body, "", baseUrl, source, headers)
+                val lastChapter = if (htmlRow != null) htmlFieldValue(htmlRow, lastChapterRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, lastChapterRule, body, "", baseUrl, source, headers)
+                val wordCount = if (htmlRow != null) htmlFieldValue(htmlRow, wordCountRule, body, "", baseUrl, source, headers)
+                    else jsonFieldValue(row, wordCountRule, body, "", baseUrl, source, headers)
+                books.add(mapOf("name" to title, "author" to author.ifBlank { "未知作者" },
+                    "bookUrl" to resolveUrl(response.finalUrl, href), "intro" to intro,
+                    "coverUrl" to if (cover.isBlank()) "" else resolveUrl(response.finalUrl, cover),
+                    "kind" to kind, "lastChapter" to lastChapter, "wordCount" to wordCount,
+                    "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source))
+            }
+
+            when {
+                jsRows != null -> jsRows.take(60).forEach(::appendJsonRow)
+                listRule.startsWith("$") -> {
+                    val jsonRoot = JsonParser.parseString(body)
+                    val rows = readJsonPath(jsonRoot, listRule)
+                    if (rows != null && rows.isJsonArray) rows.asJsonArray.take(60).forEach(::appendJsonRow)
+                }
+                else -> {
+                    selectLegadoElements(document, listRule).take(60).forEach { row ->
+                        val title = htmlFieldValue(row, nameRule, body, "", baseUrl, source, headers)
+                        val href = htmlFieldValue(row, bookUrlRule, body, "", baseUrl, source, headers)
+                        if (title.isBlank() || href.isBlank()) return@forEach
+                        val cover = htmlFieldValue(row, coverRule, body, "", baseUrl, source, headers)
+                        books.add(mapOf("name" to title,
+                            "author" to htmlFieldValue(row, authorRule, body, "", baseUrl, source, headers).ifBlank { "未知作者" },
+                            "bookUrl" to resolveUrl(response.finalUrl, href),
+                            "intro" to htmlFieldValue(row, introRule, body, "", baseUrl, source, headers),
+                            "coverUrl" to if (cover.isBlank()) "" else resolveUrl(response.finalUrl, cover),
+                            "kind" to htmlFieldValue(row, kindRule, body, "", baseUrl, source, headers),
+                            "lastChapter" to htmlFieldValue(row, lastChapterRule, body, "", baseUrl, source, headers),
+                            "wordCount" to htmlFieldValue(row, wordCountRule, body, "", baseUrl, source, headers),
+                            "sourceName" to sourceName, "sourceUrl" to baseUrl, "sourceRaw" to source))
+                    }
+                }
+            }
+            val unique = books.distinctBy { it["bookUrl"].toString() }
+            mapOf("books" to unique, "status" to if (unique.isEmpty()) "empty" else "ok",
+                "message" to if (unique.isEmpty()) "已请求书源发现页，但目录规则未匹配到书籍" else "发现 " + unique.size + " 本书")
+        } catch (e: VerificationRequiredException) {
+            mapOf("books" to empty, "status" to "verification_required", "verificationUrl" to e.verificationUrl,
+                "message" to (e.message ?: "需要人机验证"))
+        } catch (e: UnsupportedLegadoJsException) {
+            mapOf("books" to empty, "status" to "unsupported_js", "message" to (e.message ?: "发现规则 JS 暂不支持"))
+        } catch (e: Exception) {
+            mapOf("books" to empty, "status" to "error", "message" to (e.message ?: "书城分类加载失败"))
+        }
+    }
+
+    /** Retry normalized and partial title fragments if the original query returns no books. */
+    private fun expandSearchQueries(input: List<String>): List<String> {
+        val output = linkedSetOf<String>()
+        input.filter { it.isNotBlank() }.forEach { query ->
+            val clean = query.trim().replace(Regex("\\s+"), " ")
+            if (clean.isBlank()) return@forEach
+            output.add(clean)
+            val compact = clean.replace(Regex("[\\s\\p{Punct}，。！？、：；“”‘’《》【】（）…·—_]+"), "")
+            if (compact.isNotBlank() && compact != clean) output.add(compact)
+            clean.split(Regex("\\s+")).filter { it.length >= 2 }.forEach { output.add(it) }
+            if (compact.length >= 5) {
+                val half = ((compact.length + 1) / 2).coerceAtLeast(3)
+                output.add(compact.take(half))
+                output.add(compact.takeLast(half))
+            }
+            if (output.size >= 6) return output.take(6)
+        }
+        return output.take(6)
+    }
+
     /** Search sources concurrently and return both books and per-source diagnostics. */
     fun searchBatchDetailed(queriesJson: String, sourcesJson: String): Map<String, Any> = runBlocking {
         val queries: List<String> = try {
@@ -561,8 +725,9 @@ object LegadoRuleEngine {
         catch (_: Exception) { emptyList() }
 
         val selectedSources = sources.take(40)
+        val expandedQueries = expandSearchQueries(queries)
         val outcomes = selectedSources.map { source ->
-            async(Dispatchers.IO) { networkSemaphore.withPermit { searchOneSource(source, queries) } }
+            async(Dispatchers.IO) { networkSemaphore.withPermit { searchOneSource(source, expandedQueries) } }
         }.awaitAll()
         val books = outcomes.flatMap { it.books }
         val statuses = outcomes.mapIndexed { index, outcome ->

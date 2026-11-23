@@ -126,6 +126,31 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun exploreCategoriesNative(sourcesJson: String, cbId: String) {
+            scope.launch {
+                val result = try { LegadoRuleEngine.exploreCategories(sourcesJson) }
+                catch (e: Exception) {
+                    listOf(mapOf("sourceName" to "Cherie 书城", "status" to "error",
+                        "message" to (e.message ?: "分类读取失败")))
+                }
+                sendCallback(cbId, gson.toJson(result))
+            }
+        }
+
+        @JavascriptInterface
+        fun exploreBooksNative(sourceJson: String, categoryUrl: String, page: String, cbId: String) {
+            scope.launch {
+                val result = try {
+                    LegadoRuleEngine.exploreBooksDetailed(sourceJson, categoryUrl, page.toIntOrNull() ?: 1)
+                } catch (e: Exception) {
+                    mapOf("books" to emptyList<Any>(), "status" to "error",
+                        "message" to (e.message ?: "书城请求失败"))
+                }
+                sendCallback(cbId, gson.toJson(result))
+            }
+        }
+
+        @JavascriptInterface
         fun checkSourcesNative(sourcesJson: String, cbId: String) {
             scope.launch {
                 val result = try {
