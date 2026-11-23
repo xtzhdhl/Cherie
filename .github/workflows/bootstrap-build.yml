@@ -3,6 +3,7 @@ name: Bootstrap and Build Chérie Read APK
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
     paths:
       - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
       - '.github/workflows/bootstrap-build.yml'
@@ -86,7 +87,14 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CherieRead-Android-APK-v1.3.3
+          name: CherieRead-Android-APK-v1.3.4
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub Release on version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/debug/app-debug.apk
+          generate_release_notes: true

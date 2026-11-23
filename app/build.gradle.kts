@@ -11,8 +11,8 @@ android {
         applicationId = "com.cherie.read"
         minSdk = 24
         targetSdk = 34
-        versionCode = 133
-        versionName = "1.3.3"
+        versionCode = 134
+        versionName = "1.3.4"
     }
 
     buildTypes {
