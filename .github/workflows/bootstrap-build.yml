@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: cherie-read-apk-build
+  cancel-in-progress: true
+
 jobs:
   bootstrap-build:
     runs-on: ubuntu-latest
