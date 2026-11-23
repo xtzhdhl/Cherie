@@ -336,6 +336,7 @@ object LegadoRuleEngine {
                 if (parsed.isJsonArray) return parsed.asJsonArray.toList()
                 if (parsed.isJsonObject) return jsRows(parsed)
             }
+            if (text.isNotBlank()) return listOf(JsonPrimitive(text))
         }
         return emptyList()
     }
