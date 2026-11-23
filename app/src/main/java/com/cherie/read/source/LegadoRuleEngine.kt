@@ -320,23 +320,26 @@ object LegadoRuleEngine {
         else -> value.toString()
     }
 
-    private fun jsRows(value: JsonElement): List<JsonElement> {
+    private fun jsRows(value: JsonElement, depth: Int = 0): List<JsonElement> {
+        if (depth > 5) return emptyList()
         if (value.isJsonArray) return value.asJsonArray.toList()
         if (value.isJsonObject) {
             val obj = value.asJsonObject
-            listOf("books", "list", "data", "results", "items").forEach { key ->
-                val child = obj.get(key)
-                if (child != null && child.isJsonArray) return child.asJsonArray.toList()
+            val listKeys = listOf("books", "bookList", "booklist", "list", "results", "items", "records", "novels", "data", "content")
+            for (key in listKeys) {
+                val child = obj.get(key) ?: continue
+                if (child.isJsonArray) return child.asJsonArray.toList()
+                if (child.isJsonObject) {
+                    val nested = jsRows(child, depth + 1)
+                    if (nested.isNotEmpty() && !(nested.size == 1 && nested[0] === child)) return nested
+                }
             }
             return listOf(value)
         }
         if (value.isJsonPrimitive && value.asJsonPrimitive.isString) {
             val text = value.asString.trim()
             val parsed = runCatching { JsonParser.parseString(text) }.getOrNull()
-            if (parsed != null) {
-                if (parsed.isJsonArray) return parsed.asJsonArray.toList()
-                if (parsed.isJsonObject) return jsRows(parsed)
-            }
+            if (parsed != null && (parsed.isJsonArray || parsed.isJsonObject)) return jsRows(parsed, depth + 1)
             if (text.isNotBlank()) return listOf(JsonPrimitive(text))
         }
         return emptyList()
@@ -405,6 +408,14 @@ object LegadoRuleEngine {
         if (jsIndex > 0) {
             val prefix = clean.substring(0, jsIndex).trim()
             val jsRule = clean.substring(jsIndex)
+            if (prefix.startsWith("$")) {
+                val root = runCatching { JsonParser.parseString(responseBody) }.getOrNull()
+                    ?: throw IllegalArgumentException("书源返回的不是有效 JSON，无法执行 JSONPath 后置 JS 规则")
+                val values = readJsonPathMany(root, prefix).take(100).map { item ->
+                    evalSourceJs(jsRule, item, responseBody, keyword, baseUrl, source, headers)
+                }
+                return values.flatMap { value -> jsRows(value).ifEmpty { listOf(value) } }
+            }
             val values = selectLegadoElements(document, prefix).take(100).map { element ->
                 evalSourceJs(jsRule, element.outerHtml(), responseBody, keyword, baseUrl, source, headers)
             }
@@ -413,6 +424,106 @@ object LegadoRuleEngine {
         return null
     }
 
+    private fun findJsonBookRows(node: JsonElement, depth: Int = 0): List<JsonElement> {
+        if (depth > 5) return emptyList()
+        if (node.isJsonArray) return node.asJsonArray.toList()
+        if (!node.isJsonObject) return emptyList()
+        val keys = listOf("books", "bookList", "booklist", "list", "results", "items", "records", "novels", "data", "content")
+        for (key in keys) {
+            val child = node.asJsonObject.get(key) ?: continue
+            if (child.isJsonArray) return child.asJsonArray.toList()
+            if (child.isJsonObject) {
+                val nested = findJsonBookRows(child, depth + 1)
+                if (nested.isNotEmpty()) return nested
+            }
+        }
+        return emptyList()
+    }
+
+    private fun firstJsonText(row: JsonElement, aliases: List<String>): String {
+        if (!row.isJsonObject) return ""
+        val entries = row.asJsonObject.entrySet()
+        for (alias in aliases) {
+            val match = entries.firstOrNull { it.key.equals(alias, ignoreCase = true) } ?: continue
+            val value = stringValue(match.value).trim()
+            if (value.isNotBlank() && value != "null") return value
+        }
+        return ""
+    }
+
+    private fun fallbackBooksFromJson(
+        body: String,
+        finalUrl: String,
+        sourceName: String,
+        sourceUrl: String,
+        source: JsonElement
+    ): List<Map<String, Any>> {
+        val root = runCatching { JsonParser.parseString(body) }.getOrNull() ?: return emptyList()
+        val rows = findJsonBookRows(root).ifEmpty { if (root.isJsonArray) root.asJsonArray.toList() else emptyList() }
+        return rows.mapNotNull { row ->
+            val title = firstJsonText(row, listOf("bookName", "bookname", "name", "title", "novelName", "novelname", "fictionName"))
+            val href = firstJsonText(row, listOf("bookUrl", "bookurl", "url", "href", "link", "detailUrl", "detail_url", "infoUrl", "bookLink"))
+            if (title.isBlank() || href.isBlank()) return@mapNotNull null
+            mapOf(
+                "name" to title,
+                "author" to firstJsonText(row, listOf("author", "authorName", "writer")).ifBlank { "未知作者" },
+                "bookUrl" to resolveUrl(finalUrl, href),
+                "intro" to firstJsonText(row, listOf("intro", "description", "desc", "brief")),
+                "sourceName" to sourceName,
+                "sourceUrl" to sourceUrl,
+                "sourceRaw" to source
+            )
+        }.distinctBy { it["bookUrl"].toString() }.take(30)
+    }
+
+    private fun fallbackBooksFromHtml(
+        body: String,
+        finalUrl: String,
+        sourceName: String,
+        sourceUrl: String,
+        source: JsonElement
+    ): List<Map<String, Any>> {
+        val document = Jsoup.parse(body, finalUrl)
+        val out = mutableListOf<Map<String, Any>>()
+        val ignored = setOf("首页", "登录", "注册", "搜索", "上一页", "下一页", "下一章", "上一章", "目录", "书架", "我的")
+        for (anchor in document.select("a[href]")) {
+            val title = anchor.text().replace(Regex("\\s+"), " ").trim()
+            if (title.length !in 2..60 || title in ignored) continue
+            val href = anchor.absUrl("href").ifBlank { anchor.attr("href").trim() }
+            if (href.isBlank() || href.startsWith("javascript:", true) || href == finalUrl || href == sourceUrl) continue
+            val card = anchor.parents().firstOrNull { parent ->
+                val hint = parent.className() + " " + parent.id()
+                Regex("(?i)(book|novel|result|search|item|list|cover|fiction)").containsMatchIn(hint) &&
+                    parent.select("a[href]").size in 1..8
+            } ?: continue
+            val cardText = card.text().replace(Regex("\\s+"), " ").trim()
+            val author = Regex("作者\\s*[:：]?\\s*([^\\s·|｜]{2,24})").find(cardText)?.groupValues?.getOrNull(1).orEmpty()
+            val intro = cardText.take(180)
+            out.add(mapOf(
+                "name" to title,
+                "author" to author.ifBlank { "未知作者" },
+                "bookUrl" to resolveUrl(finalUrl, href),
+                "intro" to intro,
+                "sourceName" to sourceName,
+                "sourceUrl" to sourceUrl,
+                "sourceRaw" to source
+            ))
+            if (out.size >= 30) break
+        }
+        return out.distinctBy { it["bookUrl"].toString() }
+    }
+
+    private fun fallbackBooksFromResponse(
+        body: String,
+        finalUrl: String,
+        sourceName: String,
+        sourceUrl: String,
+        source: JsonElement
+    ): List<Map<String, Any>> {
+        val jsonBooks = fallbackBooksFromJson(body, finalUrl, sourceName, sourceUrl, source)
+        if (jsonBooks.isNotEmpty()) return jsonBooks
+        return fallbackBooksFromHtml(body, finalUrl, sourceName, sourceUrl, source)
+    }
 
     private fun searchOneSource(sourceElement: JsonElement, queries: List<String>): SourceSearchResult {
         val emptyBooks = mutableListOf<Map<String, Any>>()
@@ -444,13 +555,18 @@ object LegadoRuleEngine {
         var lastError = ""
         var verificationUrl = ""
         var unsupportedJs = false
+        var lastHttpCode = 0
+        var lastPageTitle = ""
+        var fallbackUsed = false
 
         for (keyword in queries.distinct().filter { it.isNotBlank() }.take(6)) {
             try {
                 val effectiveSearchUrl = resolveSearchUrl(searchUrl, baseUrl, keyword, headers, source)
                 val response = httpGetOrPost(effectiveSearchUrl, baseUrl, keyword, headers)
                 requestSucceeded = true
+                lastHttpCode = response.code
                 val body = response.body
+                lastPageTitle = runCatching { Jsoup.parse(body).title().take(48) }.getOrDefault("")
                 val previousCount = emptyBooks.size
 
                 val document = Jsoup.parse(body, response.finalUrl)
@@ -515,6 +631,13 @@ object LegadoRuleEngine {
                         ))
                     }
                 }
+                if (emptyBooks.size == previousCount) {
+                    val fallback = fallbackBooksFromResponse(body, response.finalUrl, sourceName, sourceUrl, source)
+                    if (fallback.isNotEmpty()) {
+                        emptyBooks.addAll(fallback.take(8))
+                        fallbackUsed = true
+                    }
+                }
                 if (emptyBooks.size > previousCount) break
             } catch (e: VerificationRequiredException) {
                 verificationUrl = e.verificationUrl
@@ -537,8 +660,9 @@ object LegadoRuleEngine {
             else -> "error"
         }
         val message = when (status) {
-            "ok" -> "连接成功，解析到 ${emptyBooks.size} 条结果"
-            "reachable_empty" -> "网络连接成功，但当前关键词没有匹配结果或书源解析规则未命中"
+            "ok" -> if (fallbackUsed) "原书源规则未命中，已启用兼容兜底解析，识别到 ${emptyBooks.size} 条结果"
+                else "连接成功，解析到 ${emptyBooks.size} 条结果"
+            "reachable_empty" -> "源站已响应 HTTP $lastHttpCode（页面：${lastPageTitle.ifBlank { "无标题" }}），但书源规则未提取到书目；请检查 bookList/name/bookUrl，或该页面是否依赖浏览器脚本"
             "verification_required" -> lastError
             "unsupported_js" -> lastError
             else -> lastError.ifBlank { "请求失败" }
@@ -547,15 +671,21 @@ object LegadoRuleEngine {
             "sourceName" to sourceName,
             "sourceUrl" to sourceUrl,
             "status" to status,
-            "message" to message
+            "message" to message,
+            "resultCount" to emptyBooks.size.toString()
         )
+        if (fallbackUsed) statusMap["parserMode"] = "fallback"
+        if (lastHttpCode > 0) statusMap["httpCode"] = lastHttpCode.toString()
         if (verificationUrl.isNotBlank()) statusMap["verificationUrl"] = verificationUrl
         return SourceSearchResult(emptyBooks, statusMap)
     }
 
     private fun exploreEntries(source: JsonElement, baseUrl: String): List<Pair<String, String>> {
-        val value = if (source.isJsonObject) source.asJsonObject.get("exploreUrl") else null
-        if (value == null || value.isJsonNull) return emptyList()
+        val rawValue = if (source.isJsonObject) source.asJsonObject.get("exploreUrl") else null
+        if (rawValue == null || rawValue.isJsonNull) return emptyList()
+        val value = if (rawValue.isJsonPrimitive && rawValue.asJsonPrimitive.isString) {
+            runCatching { JsonParser.parseString(rawValue.asString) }.getOrNull() ?: rawValue
+        } else rawValue
         val out = mutableListOf<Pair<String, String>>()
         fun add(title: String, url: String) {
             val cleanUrl = url.trim()
@@ -629,6 +759,7 @@ object LegadoRuleEngine {
             val lastChapterRule = stringValue(rules.get("lastChapter"))
             val wordCountRule = stringValue(rules.get("wordCount"))
             val books = mutableListOf<Map<String, Any>>()
+            var fallbackUsed = false
             val jsRows = htmlRowsFromJs(listRule, document, body, "", baseUrl, source, headers)
 
             fun appendJsonRow(row: JsonElement) {
@@ -683,9 +814,20 @@ object LegadoRuleEngine {
                     }
                 }
             }
+            if (books.isEmpty()) {
+                val fallback = fallbackBooksFromResponse(body, response.finalUrl, sourceName, baseUrl, source)
+                if (fallback.isNotEmpty()) {
+                    books.addAll(fallback.take(60))
+                    fallbackUsed = true
+                }
+            }
             val unique = books.distinctBy { it["bookUrl"].toString() }
             mapOf("books" to unique, "status" to if (unique.isEmpty()) "empty" else "ok",
-                "message" to if (unique.isEmpty()) "已请求书源发现页，但目录规则未匹配到书籍" else "发现 " + unique.size + " 本书")
+                "message" to when {
+                    unique.isEmpty() -> "已请求书源发现页，但原规则与兼容解析均未识别到书目"
+                    fallbackUsed -> "原 ruleExplore 未匹配，已用兼容解析发现 ${unique.size} 本书"
+                    else -> "发现 " + unique.size + " 本书"
+                })
         } catch (e: VerificationRequiredException) {
             mapOf("books" to empty, "status" to "verification_required", "verificationUrl" to e.verificationUrl,
                 "message" to (e.message ?: "需要人机验证"))
