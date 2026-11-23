@@ -3,6 +3,8 @@ name: Bootstrap and Build Chérie Read APK
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
   workflow_dispatch:
 
 permissions:
