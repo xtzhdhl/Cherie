@@ -5,6 +5,10 @@ on:
     branches: [ main ]
     paths:
       - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
+      - '.github/workflows/bootstrap-build.yml'
+      - 'app/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
   workflow_dispatch:
 
 permissions:
