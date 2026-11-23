@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'CherieRead-v1.3.3-GitHub-APK-Project.zip'
+      - '.github/workflows/bootstrap-build.yml'
   workflow_dispatch:
 
 permissions:
@@ -31,51 +32,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cherie"
           unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/cherie"
           cp -a "$RUNNER_TEMP/cherie/." .
-          rm -f "$ARCHIVE"
-
-          # Use stable Actions versions for the normal build workflow.
-          cat > .github/workflows/build-apk.yml <<'EOF'
-          name: Build Chérie Read Android APK
-          on:
-            push:
-              branches: [ main ]
-              tags: [ 'v*' ]
-            workflow_dispatch:
-          permissions:
-            contents: write
-          jobs:
-            build:
-              runs-on: ubuntu-latest
-              timeout-minutes: 30
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-java@v4
-                  with:
-                    distribution: temurin
-                    java-version: '17'
-                - uses: android-actions/setup-android@v3
-                - name: Install Android SDK
-                  run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
-                - uses: gradle/actions/setup-gradle@v4
-                  with:
-                    gradle-version: '8.7'
-                - name: Build Debug APK
-                  run: gradle assembleDebug --no-daemon
-                - name: Verify APK
-                  run: test -s app/build/outputs/apk/debug/app-debug.apk
-                - uses: actions/upload-artifact@v4
-                  with:
-                    name: CherieRead-Android-APK-v1.3.3
-                    path: app/build/outputs/apk/debug/app-debug.apk
-                    if-no-files-found: error
-                    retention-days: 30
-                - name: Publish release
-                  if: startsWith(github.ref, 'refs/tags/v')
-                  uses: softprops/action-gh-release@v2
-                  with:
-                    files: app/build/outputs/apk/debug/app-debug.apk
-          EOF
-          rm -f .github/workflows/bootstrap-build.yml
+          # The archive contains the normal build workflow, but this bootstrap
+          # token cannot push changes under .github/workflows. Install it later
+          # via the GitHub Contents API after this source commit succeeds.
+          rm -f .github/workflows/build-apk.yml
 
       - name: Commit expanded project
         shell: bash
@@ -84,6 +44,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+          # Keep the already-installed bootstrap workflow untouched in this push.
+          if git diff --cached --name-only | grep -q '^\.github/workflows/'; then
+            echo "Unexpected workflow-file change staged; refusing to push."
+            exit 1
+          fi
           git commit -m "Add Chérie Read v1.3.3 Android project [skip ci]"
           git push origin HEAD:main
 
