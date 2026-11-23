@@ -28,6 +28,10 @@ android {
         }
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     buildTypes {
         debug {
             if (hasCherieStableSigning) {
