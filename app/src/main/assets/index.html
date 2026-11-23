@@ -2753,7 +2753,7 @@ function bookstoreSearchOnlySource(){switchAppTab('search');document.getElementB
 
       const text = await loadChapterContent(book, ch);
       const rendered = beautifyParagraphs(text, isReaderBeautify);
-      document.getElementById('reader-paragraphs').innerHTML = rendered || '<div class="lace-card rounded-2xl mx-3 mt-6 p-4 text-center space-y-2"><p class="text-sm font-medium">正文加载失败或解析结果为空</p><p class="text-xs opacity-70">'+escapeHtml(ch.loadErrorMessage||'请检查书源正文规则、网络或人机验证状态，然后重试。')+'</p><button onclick="retryCurrentChapterContent()" class="satin-btn px-4 py-2 rounded-full text-xs">重试本章</button><button onclick="switchBookSourceFromReader()" class="px-4 py-2 rounded-full border text-xs">换源</button></div>;
+      document.getElementById('reader-paragraphs').innerHTML = rendered || '<div class="lace-card rounded-2xl mx-3 mt-6 p-4 text-center space-y-2"><p class="text-sm font-medium">正文加载失败或解析结果为空</p><p class="text-xs opacity-70">'+escapeHtml(ch.loadErrorMessage||'请检查书源正文规则、网络或人机验证状态，然后重试。')+'</p><button onclick="retryCurrentChapterContent()" class="satin-btn px-4 py-2 rounded-full text-xs">重试本章</button><button onclick="switchBookSourceFromReader()" class="px-4 py-2 rounded-full border text-xs">换源</button></div>';
       document.getElementById('reader-scroll-area').scrollTop = 0;
       updateHeroCard();
       saveAppState();
