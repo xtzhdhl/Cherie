@@ -279,7 +279,10 @@ object LegadoRuleEngine {
 
     private fun extractValue(element: Element, rule: String?): String {
         if (rule.isNullOrBlank()) return ""
-        for (alternative in splitRuleAlternatives(rule)) {
+        val raw = rule.trim().let {
+            if (it.startsWith("@CSS:", true)) it.substringAfter(':').trim() else it
+        }
+        for (alternative in splitRuleAlternatives(raw)) {
             val parts = alternative.trim().split('@')
             var current: Element? = element
             var attribute = "text"
@@ -306,24 +309,100 @@ object LegadoRuleEngine {
         return ""
     }
 
+    /**
+     * Small JSONPath scanner for common Legado source rules.
+     * Avoid java.util.regex here: the previous bracket regex is rejected by
+     * Android's Pattern implementation ("Missing closing bracket in character class").
+     */
     private fun readJsonPathMany(root: JsonElement, path: String): List<JsonElement> {
-        val clean = path.trim().removePrefix("$")
-        if (clean.isBlank()) return listOf(root)
-        val tokens = Regex("(?:\\.([^.[\\]]+)|\\[(\\d+|\\*|'[^']+'|\"[^\"]+\")\\])")
-            .findAll(clean).mapNotNull { m ->
-                val dot=m.groupValues.getOrNull(1).orEmpty();val bracket=m.groupValues.getOrNull(2).orEmpty()
-                when { dot.isNotEmpty()->dot;bracket=="*"->"*";bracket.isNotEmpty()&&bracket.first() in listOf('\\', '"')->bracket.substring(1,bracket.length-1);bracket.isNotEmpty()->bracket;else->null }
-            }.toList()
-        var current=listOf(root)
-        tokens.forEach { token -> current=current.flatMap { node -> when {
-            node.isJsonObject&&token=="*"->node.asJsonObject.entrySet().map{it.value}
-            node.isJsonObject->listOfNotNull(node.asJsonObject.get(token)?.takeUnless{it.isJsonNull})
-            node.isJsonArray&&token=="*"->node.asJsonArray.toList().filterNot{it.isJsonNull}
-            node.isJsonArray->token.toIntOrNull()?.let{idx->if(idx>=0&&idx<node.asJsonArray.size())listOf(node.asJsonArray.get(idx))else emptyList()}?:emptyList()
-            else->emptyList()
-        } } }
+        val clean = path.trim().let {
+            if (it.startsWith("@Json:", ignoreCase = true)) it.substringAfter(':').trim() else it
+        }
+        if (clean.isBlank() || clean == "$") return listOf(root)
+        if (!clean.startsWith("$")) return emptyList()
+
+        val tokens = mutableListOf<String>()
+        var i = 1
+        while (i < clean.length) {
+            when (clean[i]) {
+                '.' -> {
+                    i++
+                    if (i < clean.length && clean[i] == '.') i++ // tolerate recursive-dot form as a shallow path
+                    val start = i
+                    while (i < clean.length && clean[i] != '.' && clean[i] != '[') i++
+                    val token = clean.substring(start, i).trim()
+                    if (token.isNotEmpty()) tokens.add(token)
+                }
+                '[' -> {
+                    i++
+                    while (i < clean.length && clean[i].isWhitespace()) i++
+                    if (i >= clean.length) return emptyList()
+                    val first = clean[i]
+                    val token = if (first == '\'' || first == '"') {
+                        i++
+                        val value = StringBuilder()
+                        var escaped = false
+                        var closed = false
+                        while (i < clean.length) {
+                            val ch = clean[i++]
+                            if (escaped) {
+                                value.append(ch)
+                                escaped = false
+                            } else if (ch == '\\') {
+                                escaped = true
+                            } else if (ch == first) {
+                                closed = true
+                                break
+                            } else {
+                                value.append(ch)
+                            }
+                        }
+                        if (!closed) return emptyList()
+                        while (i < clean.length && clean[i].isWhitespace()) i++
+                        if (i >= clean.length || clean[i] != ']') return emptyList()
+                        i++
+                        value.toString()
+                    } else {
+                        val start = i
+                        while (i < clean.length && clean[i] != ']') i++
+                        if (i >= clean.length) return emptyList()
+                        val rawToken = clean.substring(start, i).trim()
+                        i++
+                        rawToken
+                    }
+                    if (token.isBlank()) return emptyList()
+                    tokens.add(token)
+                }
+                else -> {
+                    val start = i
+                    while (i < clean.length && clean[i] != '.' && clean[i] != '[') i++
+                    val token = clean.substring(start, i).trim()
+                    if (token.isNotEmpty()) tokens.add(token)
+                }
+            }
+        }
+
+        var current = listOf(root)
+        for (token in tokens) {
+            current = current.flatMap { node ->
+                when {
+                    node.isJsonObject && token == "*" ->
+                        node.asJsonObject.entrySet().map { it.value }.filterNot { it.isJsonNull }
+                    node.isJsonObject ->
+                        listOfNotNull(node.asJsonObject.get(token)?.takeUnless { it.isJsonNull })
+                    node.isJsonArray && token == "*" ->
+                        node.asJsonArray.toList().filterNot { it.isJsonNull }
+                    node.isJsonArray -> token.toIntOrNull()?.let { index ->
+                        if (index in 0 until node.asJsonArray.size()) listOf(node.asJsonArray.get(index)) else emptyList()
+                    } ?: emptyList()
+                    else -> emptyList()
+                }
+            }
+            if (current.isEmpty()) break
+        }
         return current
     }
+
     private fun readJsonPath(root: JsonElement, path: String): JsonElement? {
         val normalized = if (path.trim().startsWith("$")) path.trim() else "$." + path.trim()
         val nodes = readJsonPathMany(root, normalized)
@@ -344,7 +423,10 @@ object LegadoRuleEngine {
     }
 
     private fun selectLegadoElements(context: Element, rule: String): List<Element> {
-        val parts = rule.split('@').map { it.trim() }.filter { it.isNotEmpty() }
+        val raw = rule.trim().let {
+            if (it.startsWith("@CSS:", true)) it.substringAfter(':').trim() else it
+        }
+        val parts = raw.split('@').map { it.trim() }.filter { it.isNotEmpty() }
         if (parts.isEmpty()) return emptyList()
         var selected = try { context.select(toCss(parts[0])).toList() } catch (_: Exception) { emptyList() }
         parts.drop(1).forEach { token ->
@@ -354,66 +436,6 @@ object LegadoRuleEngine {
             }
         }
         return selected
-    }
-
-
-    /** Parse JSON returned directly or embedded in common HTML application-state scripts. */
-    private fun parseJsonPayloads(body: String, document: org.jsoup.nodes.Document): List<JsonElement> {
-        val parsed = mutableListOf<JsonElement>()
-        val seen = mutableSetOf<String>()
-
-        fun addCandidate(raw: String) {
-            val text = raw.trim().removePrefix("\uFEFF").trim()
-            if (text.isBlank() || text.length > 4_000_000 || !seen.add(text)) return
-            val normalized = text.removePrefix(")]}',").trimStart()
-            runCatching { JsonParser.parseString(normalized) }
-                .getOrNull()
-                ?.takeIf { it.isJsonObject || it.isJsonArray }
-                ?.let(parsed::add)
-        }
-
-        addCandidate(body)
-        document.select("script[type*=json], script#__NEXT_DATA__, script#__NUXT_DATA__, script#data, [data-json]")
-            .take(40)
-            .forEach { element ->
-                val raw = when {
-                    element.hasAttr("data-json") -> element.attr("data-json")
-                    else -> element.data().ifBlank { element.html() }
-                }
-                addCandidate(raw)
-            }
-
-        // Some sites put a JSON object/array inside a JavaScript assignment rather than a JSON script.
-        document.select("script:not([src])").take(40).forEach { script ->
-            val raw = script.data().ifBlank { script.html() }
-            val start = raw.indexOfFirst { it == '{' || it == '[' }
-            if (start < 0) return@forEach
-            val open = raw[start]
-            val close = if (open == '{') '}' else ']'
-            var depth = 0
-            var quote: Char? = null
-            var escaped = false
-            var end = -1
-            for (i in start until raw.length) {
-                val ch = raw[i]
-                if (quote != null) {
-                    if (escaped) escaped = false
-                    else if (ch == '\\') escaped = true
-                    else if (ch == quote) quote = null
-                    continue
-                }
-                when (ch) {
-                    '"', '\'' -> quote = ch
-                    open -> depth++
-                    close -> {
-                        depth--
-                        if (depth == 0) { end = i + 1; break }
-                    }
-                }
-            }
-            if (end > start) addCandidate(raw.substring(start, end))
-        }
-        return parsed.distinctBy { it.toString() }
     }
 
     private fun jsonObjectString(obj: com.google.gson.JsonObject, key: String): String = stringValue(obj.get(key))
