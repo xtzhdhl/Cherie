@@ -408,7 +408,7 @@ object LegadoRuleEngine {
         if (jsIndex > 0) {
             val prefix = clean.substring(0, jsIndex).trim()
             val jsRule = clean.substring(jsIndex)
-            if (prefix.startsWith("$")) {
+            if (prefix.startsWith("\\$")) {
                 val root = runCatching { JsonParser.parseString(responseBody) }.getOrNull()
                     ?: throw IllegalArgumentException("书源返回的不是有效 JSON，无法执行 JSONPath 后置 JS 规则")
                 val values = readJsonPathMany(root, prefix).take(100).map { item ->
